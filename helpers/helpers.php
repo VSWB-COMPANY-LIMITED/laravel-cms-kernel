@@ -362,6 +362,22 @@ if (!function_exists('apps_build_mapped_values')) {
         return $values_mappings;
     }
 }
+if (!function_exists('apps_gsheet_append_succeeded')) {
+    /**
+     * Quyết định một lần append Google Sheets có thực sự ghi được dòng nào không.
+     * Nhận mảng "simple object" từ AppendValuesResponse->toSimpleObject()
+     * (Google trả `updates.updatedRows`). Dùng để chống báo "synchronized" GIẢ:
+     * API có thể trả 200 nhưng không ghi dòng nào (vd tab đích bị Filter/ẩn làm
+     * lệch table-detection của Google).
+     *
+     * @param array $appendSimple
+     * @return bool
+     */
+    function apps_gsheet_append_succeeded(array $appendSimple): bool
+    {
+        return (int) data_get($appendSimple, 'updates.updatedRows', 0) >= 1;
+    }
+}
 if (!function_exists('apps_google_sheet')) {
     /**
      * Append data to a Google Sheets spreadsheet.
@@ -700,12 +716,33 @@ if (!function_exists('apps_google_sheet')) {
             $result = Sheets::setAccessToken($accessToken)
                 ->spreadsheet(Arr::get($spreadsheet, 'spreadsheet.id'))
                 ->sheetById(Arr::get($spreadsheet, 'sheet.id'))
-                ->append([$values]);
+                // INSERT_ROWS thay cho OVERWRITE mặc định: khi tab đích bị Filter/ẩn,
+                // OVERWRITE có thể ghi đè/nuốt dòng vào vùng ẩn => MẤT lead dù API trả 200.
+                // INSERT_ROWS chèn dòng vật lý (không đè dữ liệu cũ); sheet bình thường vẫn rơi đúng cuối bảng.
+                ->append([$values], 'RAW', 'INSERT_ROWS');
 
             // Log::channel($logger)->info('[GSheet Append::Done]', [
             //     'result' => $result->toSimpleObject() ?? [],
             // ]);
+            $appendSimple = (array) $result->toSimpleObject();
             #endregion Spreadsheet process data
+
+            // Verify Google THỰC SỰ đã ghi dòng (chống báo "synchronized" giả khi append trả 200 mà 0 dòng).
+            if (!apps_gsheet_append_succeeded($appendSimple)) {
+                Log::channel($logger)->error(__FUNCTION__ . ': append returned no updated rows for ' . Arr::get($spreadsheet, 'spreadsheet.id'), $appendSimple);
+                return json_encode([
+                    "error" => true,
+                    'code' => Response::HTTP_BAD_REQUEST,
+                    'statusCode' => Response::HTTP_BAD_REQUEST,
+                    "data" => [
+                        'workbookId' => Arr::get($spreadsheet, 'spreadsheet.id', null),
+                        'sheetId' => Arr::get($spreadsheet, 'sheet.id', null),
+                        'sheetName' => Arr::get($spreadsheet, 'sheet.name', null),
+                        ...$appendSimple
+                    ],
+                    "message" => "Google Sheets append returned no updated rows"
+                ]);
+            }
 
             return json_encode([
                 "error" => false,
@@ -715,7 +752,7 @@ if (!function_exists('apps_google_sheet')) {
                     'workbookId' => Arr::get($spreadsheet, 'spreadsheet.id', null),
                     'sheetId' => Arr::get($spreadsheet, 'sheet.id', null),
                     'sheetName' => Arr::get($spreadsheet, 'sheet.name', null),
-                    ...(array) $result->toSimpleObject()
+                    ...$appendSimple
                 ],
                 "message" => "Request has been successfully processed"
             ]);
