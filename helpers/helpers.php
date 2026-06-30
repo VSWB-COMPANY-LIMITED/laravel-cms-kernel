@@ -362,6 +362,57 @@ if (!function_exists('apps_build_mapped_values')) {
         return $values_mappings;
     }
 }
+if (!function_exists('apps_gsheet_order_row')) {
+    /**
+     * Sắp xếp dữ liệu 1 dòng theo đúng thứ tự header của sheet để ghi bằng values.update
+     * (update KHÔNG tự map key->cột như append). Giá trị thiếu/null => chuỗi rỗng.
+     *
+     * @param array $values  Dữ liệu dòng: assoc (key = tên header) nếu $headers có; hoặc indexed.
+     * @param array $headers Danh sách header của sheet (rỗng => coi $values đã indexed, trả array_values).
+     * @return array Dòng indexed đúng thứ tự cột.
+     */
+    function apps_gsheet_order_row(array $values, array $headers): array
+    {
+        if (empty($headers)) {
+            return array_values($values);
+        }
+        $row = [];
+        foreach ($headers as $h) {
+            $v = array_key_exists($h, $values) ? $values[$h] : '';
+            $row[] = ($v === null) ? '' : $v;
+        }
+        return $row;
+    }
+}
+if (!function_exists('apps_gsheet_next_row_index')) {
+    /**
+     * Tính số dòng (1-based) ngay SAU dữ liệu thật, dựa trên giá trị 1 cột khóa đã đọc
+     * (vd cột A/Date luôn có dữ liệu). Dùng để ghi tường minh, MIỄN NHIỄM filter/ẩn
+     * (không phụ thuộc table-detection của Google).
+     *
+     * @param mixed $keyColumnValues Kết quả ->all() khi đọc 1 cột (mảng các dòng) hoặc null.
+     * @return int Vị trí dòng trống kế tiếp (>=1).
+     */
+    function apps_gsheet_next_row_index($keyColumnValues): int
+    {
+        return (is_array($keyColumnValues) ? count($keyColumnValues) : 0) + 1;
+    }
+}
+if (!function_exists('apps_gsheet_update_succeeded')) {
+    /**
+     * Quyết định một lần values.update có thực sự ghi được ô/dòng nào không.
+     * Nhận mảng "simple object" từ BatchUpdateValuesResponse->toSimpleObject()
+     * (Google trả `totalUpdatedRows` / `totalUpdatedCells`). Chống báo thành công GIẢ.
+     *
+     * @param array $updateSimple
+     * @return bool
+     */
+    function apps_gsheet_update_succeeded(array $updateSimple): bool
+    {
+        return (int) data_get($updateSimple, 'totalUpdatedCells', 0) >= 1
+            || (int) data_get($updateSimple, 'totalUpdatedRows', 0) >= 1;
+    }
+}
 if (!function_exists('apps_gsheet_append_succeeded')) {
     /**
      * Quyết định một lần append Google Sheets có thực sự ghi được dòng nào không.
@@ -713,34 +764,65 @@ if (!function_exists('apps_google_sheet')) {
 
             // Should explicitly specify ->spreadsheet 'spreadsheet.id', avoid reuse from previous stage,
             // Be careful with incorrect spreadsheet insertion if context stage "spreadsheet.id" is modified somewhere
-            $result = Sheets::setAccessToken($accessToken)
-                ->spreadsheet(Arr::get($spreadsheet, 'spreadsheet.id'))
-                ->sheetById(Arr::get($spreadsheet, 'sheet.id'))
-                // INSERT_ROWS thay cho OVERWRITE mặc định: khi tab đích bị Filter/ẩn,
-                // OVERWRITE có thể ghi đè/nuốt dòng vào vùng ẩn => MẤT lead dù API trả 200.
-                // INSERT_ROWS chèn dòng vật lý (không đè dữ liệu cũ); sheet bình thường vẫn rơi đúng cuối bảng.
-                ->append([$values], 'RAW', 'INSERT_ROWS');
+            // GHI MIỄN NHIỄM FILTER/ẨN DÒNG:
+            // KHÔNG dùng ->append() (để Google tự dò "bảng" -> filter/ẩn/sort làm dò sai ranh giới
+            // => lead bị mất hoặc đặt nhầm chỗ, mà API vẫn trả 200). Thay vào đó: tự đọc dòng cuối thật
+            // của cột khóa (A) rồi values.update vào range tường minh A{last+1} (không qua table-detection).
+            $ssId = Arr::get($spreadsheet, 'spreadsheet.id');
+            $gid = Arr::get($spreadsheet, 'sheet.id');
 
-            // Log::channel($logger)->info('[GSheet Append::Done]', [
-            //     'result' => $result->toSimpleObject() ?? [],
-            // ]);
-            $appendSimple = (array) $result->toSimpleObject();
+            // update() không tự map key->cột như append() => phải xếp $values theo đúng thứ tự header.
+            $rowOrdered = apps_gsheet_order_row($values, $with_keys ? $headers : []);
+
+            // Khóa per-spreadsheet để 2 lead vào cùng lúc không cùng tính last+1 rồi đè nhau (best-effort).
+            $writeLock = Cache::lock('gsheet_write:' . md5($ssId . '|' . $gid), 20);
+            $gotWriteLock = false;
+            try {
+                $gotWriteLock = $writeLock->block(12);
+            } catch (\Throwable $lockEx) {
+                // Không lấy được lock (timeout/driver) => vẫn ghi để KHÔNG mất lead; chấp nhận rủi ro đua hiếm.
+                Log::channel($logger)->warning(__FUNCTION__ . ': gsheet write lock not acquired, proceeding', [$lockEx->getMessage()]);
+            }
+            try {
+                // Dòng trống ngay sau dữ liệu thật (đọc cột A — luôn có Date theo mapping lead).
+                $existingKeyColumn = Sheets::setAccessToken($accessToken)
+                    ->spreadsheet($ssId)
+                    ->sheetById($gid)
+                    ->range('A:A')
+                    ->all();
+                $targetRow = apps_gsheet_next_row_index($existingKeyColumn);
+
+                $result = Sheets::setAccessToken($accessToken)
+                    ->spreadsheet($ssId)
+                    ->sheetById($gid)
+                    ->range('A' . $targetRow)
+                    ->update([$rowOrdered], 'RAW');
+
+                $writeSimple = (array) $result->toSimpleObject();
+            } finally {
+                if ($gotWriteLock) {
+                    try {
+                        $writeLock->release();
+                    } catch (\Throwable $relEx) {
+                    }
+                }
+            }
             #endregion Spreadsheet process data
 
-            // Verify Google THỰC SỰ đã ghi dòng (chống báo "synchronized" giả khi append trả 200 mà 0 dòng).
-            if (!apps_gsheet_append_succeeded($appendSimple)) {
-                Log::channel($logger)->error(__FUNCTION__ . ': append returned no updated rows for ' . Arr::get($spreadsheet, 'spreadsheet.id'), $appendSimple);
+            // Verify Google THỰC SỰ đã ghi (chống báo "synchronized" giả).
+            if (!apps_gsheet_update_succeeded($writeSimple)) {
+                Log::channel($logger)->error(__FUNCTION__ . ': update wrote no cells for ' . $ssId, $writeSimple);
                 return json_encode([
                     "error" => true,
                     'code' => Response::HTTP_BAD_REQUEST,
                     'statusCode' => Response::HTTP_BAD_REQUEST,
                     "data" => [
-                        'workbookId' => Arr::get($spreadsheet, 'spreadsheet.id', null),
-                        'sheetId' => Arr::get($spreadsheet, 'sheet.id', null),
+                        'workbookId' => $ssId,
+                        'sheetId' => $gid,
                         'sheetName' => Arr::get($spreadsheet, 'sheet.name', null),
-                        ...$appendSimple
+                        ...$writeSimple
                     ],
-                    "message" => "Google Sheets append returned no updated rows"
+                    "message" => "Google Sheets update wrote no cells"
                 ]);
             }
 
@@ -749,10 +831,10 @@ if (!function_exists('apps_google_sheet')) {
                 'code' => Response::HTTP_OK,
                 'statusCode' => Response::HTTP_OK,
                 "data" => [
-                    'workbookId' => Arr::get($spreadsheet, 'spreadsheet.id', null),
-                    'sheetId' => Arr::get($spreadsheet, 'sheet.id', null),
+                    'workbookId' => $ssId,
+                    'sheetId' => $gid,
                     'sheetName' => Arr::get($spreadsheet, 'sheet.name', null),
-                    ...$appendSimple
+                    ...$writeSimple
                 ],
                 "message" => "Request has been successfully processed"
             ]);
