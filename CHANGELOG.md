@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+- **[Google Sheets][regression của chính bản values.update] Reset range Sheets tránh rò singleton.**
+  Bản trước set `->range('A:A')`/`->range('A{n}')` nhưng KHÔNG xoá => `Sheets` là singleton trong
+  worker => range rò sang LẦN GỌI KẾ TIẾP => lead thứ 2+ trong cùng worker process đọc header bị
+  nhầm range => ghi hụt (API vẫn báo 200, totalUpdatedCells=1 rỗng). Phát hiện qua test 2 lần gọi
+  liên tiếp dưới filter. Fix: `Sheets::range('')` trong `finally` sau mỗi lần ghi.
+
+
 ### Changed
 - **[Google Sheets][triệt để] `apps_google_sheet()` chuyển từ `append()` sang ghi tường minh `values.update`.**
   `append()` để Google tự dò "bảng" để chèn -> Filter/ẩn/sort trên tab đích làm dò sai ranh giới

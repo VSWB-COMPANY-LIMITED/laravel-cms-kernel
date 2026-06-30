@@ -800,6 +800,12 @@ if (!function_exists('apps_google_sheet')) {
 
                 $writeSimple = (array) $result->toSimpleObject();
             } finally {
+                // Reset range của Sheets (SINGLETON trong worker): code trên set ->range('A:A')/->range('A{n}'),
+                // nếu không xoá thì rò sang LẦN GỌI KẾ TIẾP -> đọc header bị nhầm range -> ghi hụt lead.
+                try {
+                    Sheets::range('');
+                } catch (\Throwable $resetEx) {
+                }
                 if ($gotWriteLock) {
                     try {
                         $writeLock->release();
