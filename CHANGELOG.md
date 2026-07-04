@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Fixed
+- **[Google Sheets][🔴 mất lead khi Google 503/500/429] Retry + backoff cho lỗi TẠM THỜI khi ghi sheet.**
+  `values.update` gặp **503 UNAVAILABLE / 500 INTERNAL / 429 rate-limit** (Google hiccup hoặc ghi dồn dập
+  vượt quota ~60/phút, vd backfill hàng loạt) => trước đây KHÔNG retry => lead RỚT (cả real-time lẫn
+  backfill). Fix: `apps_gsheet_write_with_retry` bọc `->update()` — backoff luỹ thừa (0.5→1→2→4s) tối đa 4
+  lần cho lỗi tạm thời, đồng thời tự nới grid nếu sheet đầy. Backoff cũng tự **throttle** nhịp ghi khi
+  backfill. Helper thuần `apps_gsheet_is_transient_error` + test (grid-400/permission-403 KHÔNG retry).
 - **[Google Sheets][🔴 lead kẹt khi sheet ĐẦY dòng] Tự nới grid (auto-grow) khi values.update vượt grid.**
   `values.update` (ghi tường minh A{last+1}) KHÔNG tự nới grid như `append(INSERT_ROWS)`. Khi sheet đầy
   (targetRow > rowCount) Google trả **400 "exceeds grid limits"** => lead KHÔNG đẩy được (sự cố thực tế:

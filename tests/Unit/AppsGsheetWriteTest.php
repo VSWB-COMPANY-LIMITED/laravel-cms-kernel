@@ -77,4 +77,19 @@ class AppsGsheetWriteTest extends TestCase
         $this->assertFalse(apps_gsheet_is_grid_limit_error(new \Exception('PERMISSION_DENIED')));
         $this->assertFalse(apps_gsheet_is_grid_limit_error(new \Exception('')));
     }
+
+    /** Lỗi tạm thời (503/500/429) => retry; grid-limit(400)/permission(403) => KHÔNG retry. */
+    public function test_is_transient_error_true_for_5xx_429(): void
+    {
+        $this->assertTrue(apps_gsheet_is_transient_error(new \Exception('The service is currently unavailable.', 503)));
+        $this->assertTrue(apps_gsheet_is_transient_error(new \Exception('Internal error encountered.', 500)));
+        $this->assertTrue(apps_gsheet_is_transient_error(new \Exception('rateLimitExceeded', 429)));
+    }
+
+    public function test_is_transient_error_false_for_permanent(): void
+    {
+        // grid-limit là 400 (không transient — xử lý bằng nới grid, không backoff)
+        $this->assertFalse(apps_gsheet_is_transient_error(new \Exception('exceeds grid limits. Max rows: 19765', 400)));
+        $this->assertFalse(apps_gsheet_is_transient_error(new \Exception('PERMISSION_DENIED', 403)));
+    }
 }

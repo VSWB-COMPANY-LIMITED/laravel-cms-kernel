@@ -437,6 +437,67 @@ if (!function_exists('apps_gsheet_ensure_grid_capacity')) {
         $service->spreadsheets->batchUpdate($spreadsheetId, $body);
     }
 }
+if (!function_exists('apps_gsheet_is_transient_error')) {
+    /**
+     * Lỗi TẠM THỜI của Google Sheets API (retry là được): 503 UNAVAILABLE / 500 INTERNAL /
+     * 429 rate-limit·quota. Xảy ra khi Google hiccup hoặc ghi dồn dập vượt quota (~60 write/phút).
+     * KHÔNG retry lỗi vĩnh viễn (400 bad-request khác grid, 403 permission...). Pure => testable.
+     */
+    function apps_gsheet_is_transient_error(\Throwable $e): bool
+    {
+        $code = (int) $e->getCode();
+        if (in_array($code, [429, 500, 503], true)) {
+            return true;
+        }
+        $m = (string) $e->getMessage();
+
+        return stripos($m, 'UNAVAILABLE') !== false
+            || stripos($m, 'currently unavailable') !== false
+            || stripos($m, 'Internal error') !== false
+            || stripos($m, 'backendError') !== false
+            || stripos($m, 'rateLimitExceeded') !== false
+            || stripos($m, 'Quota exceeded') !== false
+            || stripos($m, 'RESOURCE_EXHAUSTED') !== false;
+    }
+}
+if (!function_exists('apps_gsheet_write_with_retry')) {
+    /**
+     * Chạy 1 lần ghi Google Sheet với retry:
+     *  - Grid đầy (exceeds grid limits) -> nới dòng (appendDimension) 1 lần rồi ghi lại.
+     *  - Lỗi tạm thời (503/500/429) -> backoff luỹ thừa (0.5s,1s,2s,4s) rồi thử lại tối đa $maxTransient lần.
+     *  - Lỗi khác -> ném ra (không nuốt).
+     * Trả về kết quả của $write (BatchUpdateValuesResponse). Backoff cũng tự throttle nhịp khi backfill.
+     */
+    function apps_gsheet_write_with_retry(callable $write, string $accessToken, string $ssId, int $sheetId, string $logger, int $maxTransient = 4)
+    {
+        $gridGrown = false;
+        $transient = 0;
+        while (true) {
+            try {
+                return $write();
+            } catch (\Throwable $e) {
+                if (apps_gsheet_is_grid_limit_error($e) && ! $gridGrown) {
+                    $gridGrown = true;
+                    Log::channel($logger)->warning('gsheet: sheet đầy grid, tự nới rồi ghi lại', [
+                        'spreadsheet' => $ssId, 'sheetId' => $sheetId,
+                    ]);
+                    apps_gsheet_ensure_grid_capacity($accessToken, $ssId, $sheetId);
+                    continue;
+                }
+                if (apps_gsheet_is_transient_error($e) && $transient < $maxTransient) {
+                    $transient++;
+                    $sleepMs = (int) (500 * pow(2, $transient - 1)); // 0.5s,1s,2s,4s
+                    Log::channel($logger)->warning("gsheet: lỗi tạm thời, retry {$transient}/{$maxTransient} sau {$sleepMs}ms", [
+                        'spreadsheet' => $ssId, 'msg' => substr($e->getMessage(), 0, 140),
+                    ]);
+                    usleep($sleepMs * 1000);
+                    continue;
+                }
+                throw $e;
+            }
+        }
+    }
+}
 if (!function_exists('apps_gsheet_update_succeeded')) {
     /**
      * Quyết định một lần values.update có thực sự ghi được ô/dòng nào không.
@@ -831,30 +892,23 @@ if (!function_exists('apps_google_sheet')) {
                     ->all();
                 $targetRow = apps_gsheet_next_row_index($existingKeyColumn);
 
-                try {
-                    $result = Sheets::setAccessToken($accessToken)
+                // Ghi CÓ RETRY (apps_gsheet_write_with_retry):
+                //  (1) sheet ĐẦY grid (400 "exceeds grid limits") -> tự nới dòng (appendDimension) rồi ghi
+                //      lại — KHÔNG phải chừa dòng trống thủ công cho từng sheet khách.
+                //  (2) lỗi TẠM THỜI của Google (503 UNAVAILABLE / 500 INTERNAL / 429 rate-limit) -> backoff
+                //      rồi thử lại — chống MẤT LEAD khi Google hiccup hoặc tải cao (vd backfill hàng loạt);
+                //      backoff cũng tự throttle nhịp ghi.
+                $result = apps_gsheet_write_with_retry(
+                    fn() => Sheets::setAccessToken($accessToken)
                         ->spreadsheet($ssId)
                         ->sheetById($gid)
                         ->range('A' . $targetRow)
-                        ->update([$rowOrdered], 'RAW');
-                } catch (\Throwable $gridEx) {
-                    // values.update KHÔNG tự nới grid (khác append INSERT_ROWS). Khi sheet ĐẦY dòng
-                    // (targetRow > rowCount) Google trả 400 "exceeds grid limits" => lead kẹt. Chủ động
-                    // thêm dòng ở CUỐI sheet (appendDimension) rồi ghi lại — để KHÔNG phải chừa dòng
-                    // trống thủ công cho từng sheet khách (grid tự lớn theo lead).
-                    if (! apps_gsheet_is_grid_limit_error($gridEx)) {
-                        throw $gridEx;
-                    }
-                    Log::channel($logger)->warning(__FUNCTION__ . ': sheet đầy grid, tự nới rồi ghi lại', [
-                        'spreadsheet' => $ssId, 'sheetId' => $gid, 'targetRow' => $targetRow,
-                    ]);
-                    apps_gsheet_ensure_grid_capacity($accessToken, $ssId, (int) $gid);
-                    $result = Sheets::setAccessToken($accessToken)
-                        ->spreadsheet($ssId)
-                        ->sheetById($gid)
-                        ->range('A' . $targetRow)
-                        ->update([$rowOrdered], 'RAW');
-                }
+                        ->update([$rowOrdered], 'RAW'),
+                    $accessToken,
+                    $ssId,
+                    (int) $gid,
+                    $logger
+                );
 
                 $writeSimple = (array) $result->toSimpleObject();
             } finally {
