@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Fixed
+- **[Google Sheets][🔴 lead kẹt khi sheet ĐẦY dòng] Tự nới grid (auto-grow) khi values.update vượt grid.**
+  `values.update` (ghi tường minh A{last+1}) KHÔNG tự nới grid như `append(INSERT_ROWS)`. Khi sheet đầy
+  (targetRow > rowCount) Google trả **400 "exceeds grid limits"** => lead KHÔNG đẩy được (sự cố thực tế:
+  Toyota "Lead Hilux" đầy 19765 dòng + "DGM 2026" đầy 11929 dòng, kẹt từ đầu tháng 7). Fix: bắt lỗi
+  grid-limit quanh `->update()` => `apps_gsheet_ensure_grid_capacity()` gọi `appendDimension` thêm 2000
+  dòng cuối sheet => ghi lại. **KHÔNG phải chừa dòng trống thủ công** cho từng sheet khách; grid tự lớn
+  theo lead. Helper thuần `apps_gsheet_is_grid_limit_error` + test `AppsGsheetWriteTest` (logic 3/3).
 - **[Google Sheets][regression của chính bản values.update] Reset range Sheets tránh rò singleton.**
   Bản trước set `->range('A:A')`/`->range('A{n}')` nhưng KHÔNG xoá => `Sheets` là singleton trong
   worker => range rò sang LẦN GỌI KẾ TIẾP => lead thứ 2+ trong cùng worker process đọc header bị

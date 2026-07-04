@@ -64,4 +64,17 @@ class AppsGsheetWriteTest extends TestCase
     {
         $this->assertSame($expected, apps_gsheet_update_succeeded($simple));
     }
+
+    /** Sheet đầy dòng: nhận diện lỗi grid-limit để chủ động nới grid (auto-grow). */
+    public function test_is_grid_limit_error_detects_exceeds_message(): void
+    {
+        $e = new \Exception('Invalid data[0]: Range (Raw!A19766) exceeds grid limits. Max rows: 19765, max columns: 23');
+        $this->assertTrue(apps_gsheet_is_grid_limit_error($e));
+    }
+
+    public function test_is_grid_limit_error_false_for_other_errors(): void
+    {
+        $this->assertFalse(apps_gsheet_is_grid_limit_error(new \Exception('PERMISSION_DENIED')));
+        $this->assertFalse(apps_gsheet_is_grid_limit_error(new \Exception('')));
+    }
 }

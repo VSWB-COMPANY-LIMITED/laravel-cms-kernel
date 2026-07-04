@@ -398,6 +398,45 @@ if (!function_exists('apps_gsheet_next_row_index')) {
         return (is_array($keyColumnValues) ? count($keyColumnValues) : 0) + 1;
     }
 }
+if (!function_exists('apps_gsheet_is_grid_limit_error')) {
+    /**
+     * Nhận diện lỗi Google Sheets "sheet đầy dòng" khi values.update ghi vào range vượt grid
+     * (message: "... exceeds grid limits. Max rows: N ..."). values.update KHÔNG tự nới grid như
+     * append(INSERT_ROWS) => phải bắt lỗi này để chủ động thêm dòng. Pure => testable (RULE#0.0).
+     */
+    function apps_gsheet_is_grid_limit_error(\Throwable $e): bool
+    {
+        $m = (string) $e->getMessage();
+
+        return stripos($m, 'exceeds grid limits') !== false
+            || stripos($m, 'above the grid limits') !== false;
+    }
+}
+if (!function_exists('apps_gsheet_ensure_grid_capacity')) {
+    /**
+     * Thêm $buffer dòng vào CUỐI sheet (appendDimension ROWS) để có chỗ ghi tiếp — gọi khi sheet đầy.
+     * Không cần đọc rowCount hiện tại: lỗi grid-limit chỉ fires khi grid đã đầy nên thêm buffer là đủ
+     * + dư cho nhiều lead sau (đỡ gọi API mỗi lead). Mục tiêu: KHÔNG phải chừa dòng trống thủ công.
+     */
+    function apps_gsheet_ensure_grid_capacity(string $accessToken, string $spreadsheetId, int $sheetId, int $buffer = 2000): void
+    {
+        $service = Sheets::setAccessToken($accessToken)
+            ->spreadsheet($spreadsheetId)
+            ->getService();
+
+        $body = new \Google\Service\Sheets\BatchUpdateSpreadsheetRequest([
+            'requests' => [[
+                'appendDimension' => [
+                    'sheetId'   => $sheetId,
+                    'dimension' => 'ROWS',
+                    'length'    => $buffer,
+                ],
+            ]],
+        ]);
+
+        $service->spreadsheets->batchUpdate($spreadsheetId, $body);
+    }
+}
 if (!function_exists('apps_gsheet_update_succeeded')) {
     /**
      * Quyết định một lần values.update có thực sự ghi được ô/dòng nào không.
@@ -792,11 +831,30 @@ if (!function_exists('apps_google_sheet')) {
                     ->all();
                 $targetRow = apps_gsheet_next_row_index($existingKeyColumn);
 
-                $result = Sheets::setAccessToken($accessToken)
-                    ->spreadsheet($ssId)
-                    ->sheetById($gid)
-                    ->range('A' . $targetRow)
-                    ->update([$rowOrdered], 'RAW');
+                try {
+                    $result = Sheets::setAccessToken($accessToken)
+                        ->spreadsheet($ssId)
+                        ->sheetById($gid)
+                        ->range('A' . $targetRow)
+                        ->update([$rowOrdered], 'RAW');
+                } catch (\Throwable $gridEx) {
+                    // values.update KHÔNG tự nới grid (khác append INSERT_ROWS). Khi sheet ĐẦY dòng
+                    // (targetRow > rowCount) Google trả 400 "exceeds grid limits" => lead kẹt. Chủ động
+                    // thêm dòng ở CUỐI sheet (appendDimension) rồi ghi lại — để KHÔNG phải chừa dòng
+                    // trống thủ công cho từng sheet khách (grid tự lớn theo lead).
+                    if (! apps_gsheet_is_grid_limit_error($gridEx)) {
+                        throw $gridEx;
+                    }
+                    Log::channel($logger)->warning(__FUNCTION__ . ': sheet đầy grid, tự nới rồi ghi lại', [
+                        'spreadsheet' => $ssId, 'sheetId' => $gid, 'targetRow' => $targetRow,
+                    ]);
+                    apps_gsheet_ensure_grid_capacity($accessToken, $ssId, (int) $gid);
+                    $result = Sheets::setAccessToken($accessToken)
+                        ->spreadsheet($ssId)
+                        ->sheetById($gid)
+                        ->range('A' . $targetRow)
+                        ->update([$rowOrdered], 'RAW');
+                }
 
                 $writeSimple = (array) $result->toSimpleObject();
             } finally {
