@@ -418,7 +418,7 @@ if (!function_exists('apps_gsheet_ensure_grid_capacity')) {
      * Không cần đọc rowCount hiện tại: lỗi grid-limit chỉ fires khi grid đã đầy nên thêm buffer là đủ
      * + dư cho nhiều lead sau (đỡ gọi API mỗi lead). Mục tiêu: KHÔNG phải chừa dòng trống thủ công.
      */
-    function apps_gsheet_ensure_grid_capacity(string $accessToken, string $spreadsheetId, int $sheetId, int $buffer = 2000): void
+    function apps_gsheet_ensure_grid_capacity($accessToken, string $spreadsheetId, int $sheetId, int $buffer = 2000): void
     {
         $service = Sheets::setAccessToken($accessToken)
             ->spreadsheet($spreadsheetId)
@@ -468,7 +468,7 @@ if (!function_exists('apps_gsheet_write_with_retry')) {
      *  - Lỗi khác -> ném ra (không nuốt).
      * Trả về kết quả của $write (BatchUpdateValuesResponse). Backoff cũng tự throttle nhịp khi backfill.
      */
-    function apps_gsheet_write_with_retry(callable $write, string $accessToken, string $ssId, int $sheetId, string $logger, int $maxTransient = 4)
+    function apps_gsheet_write_with_retry(callable $write, $accessToken, string $ssId, int $sheetId, string $logger, int $maxTransient = 4)
     {
         $gridGrown = false;
         $transient = 0;
