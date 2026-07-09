@@ -5,9 +5,8 @@ namespace Tests\Unit;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Bảo vệ logic ghi Google Sheet MIỄN NHIỄM filter/ẩn dòng:
- * - order_row: xếp dữ liệu theo đúng thứ tự header (update không tự map như append).
- * - next_row_index: tính dòng trống kế tiếp từ cột khóa đã đọc.
+ * Bảo vệ logic ghi Google Sheet:
+ * - order_row: xếp dữ liệu theo đúng thứ tự header (append ghi tuần tự từ cột A).
  * - update_succeeded / append_succeeded: chống báo thành công GIẢ.
  */
 class AppsGsheetWriteTest extends TestCase
@@ -31,22 +30,6 @@ class AppsGsheetWriteTest extends TestCase
     public function test_order_row_indexed_passthrough_when_no_headers(): void
     {
         $this->assertSame(['a', 'b', 'c'], apps_gsheet_order_row(['a', 'b', 'c'], []));
-    }
-
-    public static function nextRowProvider(): array
-    {
-        return [
-            'empty sheet'   => [[], 1],
-            'null'          => [null, 1],
-            'header+5 rows' => [[['h'], ['r1'], ['r2'], ['r3'], ['r4'], ['r5']], 7],
-            'header only'   => [[['Date']], 2],
-        ];
-    }
-
-    /** @dataProvider nextRowProvider */
-    public function test_next_row_index($keyColumn, int $expected): void
-    {
-        $this->assertSame($expected, apps_gsheet_next_row_index($keyColumn));
     }
 
     public static function updateResultProvider(): array

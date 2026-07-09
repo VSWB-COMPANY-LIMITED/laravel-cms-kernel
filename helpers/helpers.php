@@ -384,20 +384,6 @@ if (!function_exists('apps_gsheet_order_row')) {
         return $row;
     }
 }
-if (!function_exists('apps_gsheet_next_row_index')) {
-    /**
-     * Tính số dòng (1-based) ngay SAU dữ liệu thật, dựa trên giá trị 1 cột khóa đã đọc
-     * (vd cột A/Date luôn có dữ liệu). Dùng để ghi tường minh, MIỄN NHIỄM filter/ẩn
-     * (không phụ thuộc table-detection của Google).
-     *
-     * @param mixed $keyColumnValues Kết quả ->all() khi đọc 1 cột (mảng các dòng) hoặc null.
-     * @return int Vị trí dòng trống kế tiếp (>=1).
-     */
-    function apps_gsheet_next_row_index($keyColumnValues): int
-    {
-        return (is_array($keyColumnValues) ? count($keyColumnValues) : 0) + 1;
-    }
-}
 if (!function_exists('apps_gsheet_is_grid_limit_error')) {
     /**
      * Nhận diện lỗi Google Sheets "sheet đầy dòng" khi values.update ghi vào range vượt grid
@@ -864,17 +850,17 @@ if (!function_exists('apps_google_sheet')) {
 
             // Should explicitly specify ->spreadsheet 'spreadsheet.id', avoid reuse from previous stage,
             // Be careful with incorrect spreadsheet insertion if context stage "spreadsheet.id" is modified somewhere
-            // GHI MIỄN NHIỄM FILTER/ẨN DÒNG:
-            // KHÔNG dùng ->append() (để Google tự dò "bảng" -> filter/ẩn/sort làm dò sai ranh giới
-            // => lead bị mất hoặc đặt nhầm chỗ, mà API vẫn trả 200). Thay vào đó: tự đọc dòng cuối thật
-            // của cột khóa (A) rồi values.update vào range tường minh A{last+1} (không qua table-detection).
+            // GHI BẰNG append(INSERT_ROWS) — Google tính dòng cuối server-side, ATOMIC, không collision.
+            // (Bản trước tự đọc cột A rồi values.update A{last+1} bị stale read-after-write => đè A2, mất
+            // lead im lặng. Đánh đổi: append dò "bảng" nên nếu khách tự bật Filter/ẩn có thể lệch — chấp
+            // nhận lỗi chủ quan hiếm này để đổi lấy chống mất-lead im lặng cho mọi khách.)
             $ssId = Arr::get($spreadsheet, 'spreadsheet.id');
             $gid = Arr::get($spreadsheet, 'sheet.id');
 
-            // update() không tự map key->cột như append() => phải xếp $values theo đúng thứ tự header.
+            // Xếp $values theo đúng thứ tự header để append rơi đúng cột (append ghi tuần tự từ cột A).
             $rowOrdered = apps_gsheet_order_row($values, $with_keys ? $headers : []);
 
-            // Khóa per-spreadsheet để 2 lead vào cùng lúc không cùng tính last+1 rồi đè nhau (best-effort).
+            // Khóa per-spreadsheet (best-effort) — với append atomic thì ít cần, giữ để throttle ghi đua.
             $writeLock = Cache::lock('gsheet_write:' . md5($ssId . '|' . $gid), 20);
             $gotWriteLock = false;
             try {
@@ -884,26 +870,18 @@ if (!function_exists('apps_google_sheet')) {
                 Log::channel($logger)->warning(__FUNCTION__ . ': gsheet write lock not acquired, proceeding', [$lockEx->getMessage()]);
             }
             try {
-                // Dòng trống ngay sau dữ liệu thật (đọc cột A — luôn có Date theo mapping lead).
-                $existingKeyColumn = Sheets::setAccessToken($accessToken)
-                    ->spreadsheet($ssId)
-                    ->sheetById($gid)
-                    ->range('A:A')
-                    ->all();
-                $targetRow = apps_gsheet_next_row_index($existingKeyColumn);
-
-                // Ghi CÓ RETRY (apps_gsheet_write_with_retry):
-                //  (1) sheet ĐẦY grid (400 "exceeds grid limits") -> tự nới dòng (appendDimension) rồi ghi
-                //      lại — KHÔNG phải chừa dòng trống thủ công cho từng sheet khách.
-                //  (2) lỗi TẠM THỜI của Google (503 UNAVAILABLE / 500 INTERNAL / 429 rate-limit) -> backoff
-                //      rồi thử lại — chống MẤT LEAD khi Google hiccup hoặc tải cao (vd backfill hàng loạt);
-                //      backoff cũng tự throttle nhịp ghi.
+                // Ghi bằng append(INSERT_ROWS): Google tự tính dòng cuối SERVER-SIDE (atomic) => KHÔNG
+                // collision khi nhiều lead ghi dồn (queue burst). Khắc phục bug bản values.update A{count(A:A)+1}:
+                // đọc cột A bị stale do read-after-write lag của Google => mọi lead cùng tính targetRow=2 =>
+                // đè lên A2 (mất lead IM LẶNG cho MỌI khách). INSERT_ROWS chèn dòng vật lý (không OVERWRITE).
+                // Retry (apps_gsheet_write_with_retry): lỗi TẠM THỜI 503/500/429 -> backoff rồi thử lại
+                // (chống mất lead khi Google hiccup/tải cao); nhánh grid-limit gần như không kích hoạt vì
+                // append(INSERT_ROWS) tự nới grid.
                 $result = apps_gsheet_write_with_retry(
                     fn() => Sheets::setAccessToken($accessToken)
                         ->spreadsheet($ssId)
                         ->sheetById($gid)
-                        ->range('A' . $targetRow)
-                        ->update([$rowOrdered], 'RAW'),
+                        ->append([$rowOrdered], 'RAW', 'INSERT_ROWS'),
                     $accessToken,
                     $ssId,
                     (int) $gid,
@@ -927,9 +905,9 @@ if (!function_exists('apps_google_sheet')) {
             }
             #endregion Spreadsheet process data
 
-            // Verify Google THỰC SỰ đã ghi (chống báo "synchronized" giả).
-            if (!apps_gsheet_update_succeeded($writeSimple)) {
-                Log::channel($logger)->error(__FUNCTION__ . ': update wrote no cells for ' . $ssId, $writeSimple);
+            // Verify Google THỰC SỰ đã ghi dòng (chống báo "synchronized" giả khi append trả 200 mà 0 dòng).
+            if (!apps_gsheet_append_succeeded($writeSimple)) {
+                Log::channel($logger)->error(__FUNCTION__ . ': append returned no updated rows for ' . $ssId, $writeSimple);
                 return json_encode([
                     "error" => true,
                     'code' => Response::HTTP_BAD_REQUEST,
@@ -940,7 +918,7 @@ if (!function_exists('apps_google_sheet')) {
                         'sheetName' => Arr::get($spreadsheet, 'sheet.name', null),
                         ...$writeSimple
                     ],
-                    "message" => "Google Sheets update wrote no cells"
+                    "message" => "Google Sheets append returned no updated rows"
                 ]);
             }
 

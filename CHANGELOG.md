@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Fixed
+- **[Google Sheets][🔴🔴 CRITICAL — mất lead IM LẶNG do collision] `apps_google_sheet()` revert từ `values.update A{count(A:A)+1}` về `append(INSERT_ROWS)`.**
+  Bản `values.update` tự đọc cột A rồi ghi `A{count+1}`: khi nhiều lead ghi dồn (queue burst) + Google
+  **read-after-write lag**, mọi lead đọc `count(A:A)` bị stale (=1, chỉ thấy header) => cùng tính targetRow=2
+  => **ĐÈ lên nhau ở A2**, chỉ dòng ghi cuối sống sót (data-loss IM LẶNG cho MỌI khách dù API trả 200).
+  Case thực: sheet "Follow CRM - Teraco" **5/5 lead cùng `A2:G2`**, sheet khác (Toyota/TOY) append đúng dòng
+  13203/20523. Fix: quay lại `append([$row],'RAW','INSERT_ROWS')` — Google tính dòng cuối **server-side
+  ATOMIC** => hết collision; verify `apps_gsheet_append_succeeded`. Đánh đổi CÓ CHỦ ĐÍCH (user chốt): append
+  dò "bảng" nên nếu KHÁCH tự bật Filter/ẩn có thể lệch — chấp nhận lỗi **chủ quan hiếm** này để đổi lấy chống
+  mất-lead IM LẶNG cho MỌI khách. Giữ retry/backoff + reset singleton + Cache::lock. Gỡ helper
+  `apps_gsheet_next_row_index` (nguồn bug). Test `AppsGsheetWriteTest` cập nhật (bỏ case next_row_index).
 - **[Google Sheets][🔴 mất lead khi Google 503/500/429] Retry + backoff cho lỗi TẠM THỜI khi ghi sheet.**
   `values.update` gặp **503 UNAVAILABLE / 500 INTERNAL / 429 rate-limit** (Google hiccup hoặc ghi dồn dập
   vượt quota ~60/phút, vd backfill hàng loạt) => trước đây KHÔNG retry => lead RỚT (cả real-time lẫn
