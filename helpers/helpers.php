@@ -362,159 +362,6 @@ if (!function_exists('apps_build_mapped_values')) {
         return $values_mappings;
     }
 }
-if (!function_exists('apps_gsheet_order_row')) {
-    /**
-     * Sắp xếp dữ liệu 1 dòng theo đúng thứ tự header của sheet để ghi bằng values.update
-     * (update KHÔNG tự map key->cột như append). Giá trị thiếu/null => chuỗi rỗng.
-     *
-     * @param array $values  Dữ liệu dòng: assoc (key = tên header) nếu $headers có; hoặc indexed.
-     * @param array $headers Danh sách header của sheet (rỗng => coi $values đã indexed, trả array_values).
-     * @return array Dòng indexed đúng thứ tự cột.
-     */
-    function apps_gsheet_order_row(array $values, array $headers): array
-    {
-        if (empty($headers)) {
-            return array_values($values);
-        }
-        $row = [];
-        foreach ($headers as $h) {
-            $v = array_key_exists($h, $values) ? $values[$h] : '';
-            $row[] = ($v === null) ? '' : $v;
-        }
-        return $row;
-    }
-}
-if (!function_exists('apps_gsheet_is_grid_limit_error')) {
-    /**
-     * Nhận diện lỗi Google Sheets "sheet đầy dòng" khi values.update ghi vào range vượt grid
-     * (message: "... exceeds grid limits. Max rows: N ..."). values.update KHÔNG tự nới grid như
-     * append(INSERT_ROWS) => phải bắt lỗi này để chủ động thêm dòng. Pure => testable (RULE#0.0).
-     */
-    function apps_gsheet_is_grid_limit_error(\Throwable $e): bool
-    {
-        $m = (string) $e->getMessage();
-
-        return stripos($m, 'exceeds grid limits') !== false
-            || stripos($m, 'above the grid limits') !== false;
-    }
-}
-if (!function_exists('apps_gsheet_ensure_grid_capacity')) {
-    /**
-     * Thêm $buffer dòng vào CUỐI sheet (appendDimension ROWS) để có chỗ ghi tiếp — gọi khi sheet đầy.
-     * Không cần đọc rowCount hiện tại: lỗi grid-limit chỉ fires khi grid đã đầy nên thêm buffer là đủ
-     * + dư cho nhiều lead sau (đỡ gọi API mỗi lead). Mục tiêu: KHÔNG phải chừa dòng trống thủ công.
-     */
-    function apps_gsheet_ensure_grid_capacity($accessToken, string $spreadsheetId, int $sheetId, int $buffer = 2000): void
-    {
-        $service = Sheets::setAccessToken($accessToken)
-            ->spreadsheet($spreadsheetId)
-            ->getService();
-
-        $body = new \Google\Service\Sheets\BatchUpdateSpreadsheetRequest([
-            'requests' => [[
-                'appendDimension' => [
-                    'sheetId'   => $sheetId,
-                    'dimension' => 'ROWS',
-                    'length'    => $buffer,
-                ],
-            ]],
-        ]);
-
-        $service->spreadsheets->batchUpdate($spreadsheetId, $body);
-    }
-}
-if (!function_exists('apps_gsheet_is_transient_error')) {
-    /**
-     * Lỗi TẠM THỜI của Google Sheets API (retry là được): 503 UNAVAILABLE / 500 INTERNAL /
-     * 429 rate-limit·quota. Xảy ra khi Google hiccup hoặc ghi dồn dập vượt quota (~60 write/phút).
-     * KHÔNG retry lỗi vĩnh viễn (400 bad-request khác grid, 403 permission...). Pure => testable.
-     */
-    function apps_gsheet_is_transient_error(\Throwable $e): bool
-    {
-        $code = (int) $e->getCode();
-        if (in_array($code, [429, 500, 503], true)) {
-            return true;
-        }
-        $m = (string) $e->getMessage();
-
-        return stripos($m, 'UNAVAILABLE') !== false
-            || stripos($m, 'currently unavailable') !== false
-            || stripos($m, 'Internal error') !== false
-            || stripos($m, 'backendError') !== false
-            || stripos($m, 'rateLimitExceeded') !== false
-            || stripos($m, 'Quota exceeded') !== false
-            || stripos($m, 'RESOURCE_EXHAUSTED') !== false;
-    }
-}
-if (!function_exists('apps_gsheet_write_with_retry')) {
-    /**
-     * Chạy 1 lần ghi Google Sheet với retry:
-     *  - Grid đầy (exceeds grid limits) -> nới dòng (appendDimension) 1 lần rồi ghi lại.
-     *  - Lỗi tạm thời (503/500/429) -> backoff luỹ thừa (0.5s,1s,2s,4s) rồi thử lại tối đa $maxTransient lần.
-     *  - Lỗi khác -> ném ra (không nuốt).
-     * Trả về kết quả của $write (BatchUpdateValuesResponse). Backoff cũng tự throttle nhịp khi backfill.
-     */
-    function apps_gsheet_write_with_retry(callable $write, $accessToken, string $ssId, int $sheetId, string $logger, int $maxTransient = 4)
-    {
-        $gridGrown = false;
-        $transient = 0;
-        while (true) {
-            try {
-                return $write();
-            } catch (\Throwable $e) {
-                if (apps_gsheet_is_grid_limit_error($e) && ! $gridGrown) {
-                    $gridGrown = true;
-                    Log::channel($logger)->warning('gsheet: sheet đầy grid, tự nới rồi ghi lại', [
-                        'spreadsheet' => $ssId, 'sheetId' => $sheetId,
-                    ]);
-                    apps_gsheet_ensure_grid_capacity($accessToken, $ssId, $sheetId);
-                    continue;
-                }
-                if (apps_gsheet_is_transient_error($e) && $transient < $maxTransient) {
-                    $transient++;
-                    $sleepMs = (int) (500 * pow(2, $transient - 1)); // 0.5s,1s,2s,4s
-                    Log::channel($logger)->warning("gsheet: lỗi tạm thời, retry {$transient}/{$maxTransient} sau {$sleepMs}ms", [
-                        'spreadsheet' => $ssId, 'msg' => substr($e->getMessage(), 0, 140),
-                    ]);
-                    usleep($sleepMs * 1000);
-                    continue;
-                }
-                throw $e;
-            }
-        }
-    }
-}
-if (!function_exists('apps_gsheet_update_succeeded')) {
-    /**
-     * Quyết định một lần values.update có thực sự ghi được ô/dòng nào không.
-     * Nhận mảng "simple object" từ BatchUpdateValuesResponse->toSimpleObject()
-     * (Google trả `totalUpdatedRows` / `totalUpdatedCells`). Chống báo thành công GIẢ.
-     *
-     * @param array $updateSimple
-     * @return bool
-     */
-    function apps_gsheet_update_succeeded(array $updateSimple): bool
-    {
-        return (int) data_get($updateSimple, 'totalUpdatedCells', 0) >= 1
-            || (int) data_get($updateSimple, 'totalUpdatedRows', 0) >= 1;
-    }
-}
-if (!function_exists('apps_gsheet_append_succeeded')) {
-    /**
-     * Quyết định một lần append Google Sheets có thực sự ghi được dòng nào không.
-     * Nhận mảng "simple object" từ AppendValuesResponse->toSimpleObject()
-     * (Google trả `updates.updatedRows`). Dùng để chống báo "synchronized" GIẢ:
-     * API có thể trả 200 nhưng không ghi dòng nào (vd tab đích bị Filter/ẩn làm
-     * lệch table-detection của Google).
-     *
-     * @param array $appendSimple
-     * @return bool
-     */
-    function apps_gsheet_append_succeeded(array $appendSimple): bool
-    {
-        return (int) data_get($appendSimple, 'updates.updatedRows', 0) >= 1;
-    }
-}
 if (!function_exists('apps_google_sheet')) {
     /**
      * Append data to a Google Sheets spreadsheet.
@@ -850,87 +697,25 @@ if (!function_exists('apps_google_sheet')) {
 
             // Should explicitly specify ->spreadsheet 'spreadsheet.id', avoid reuse from previous stage,
             // Be careful with incorrect spreadsheet insertion if context stage "spreadsheet.id" is modified somewhere
-            // GHI BẰNG append(INSERT_ROWS) — Google tính dòng cuối server-side, ATOMIC, không collision.
-            // (Bản trước tự đọc cột A rồi values.update A{last+1} bị stale read-after-write => đè A2, mất
-            // lead im lặng. Đánh đổi: append dò "bảng" nên nếu khách tự bật Filter/ẩn có thể lệch — chấp
-            // nhận lỗi chủ quan hiếm này để đổi lấy chống mất-lead im lặng cho mọi khách.)
-            $ssId = Arr::get($spreadsheet, 'spreadsheet.id');
-            $gid = Arr::get($spreadsheet, 'sheet.id');
+            $result = Sheets::setAccessToken($accessToken)
+                ->spreadsheet(Arr::get($spreadsheet, 'spreadsheet.id'))
+                ->sheetById(Arr::get($spreadsheet, 'sheet.id'))
+                ->append([$values]);
 
-            // Xếp $values theo đúng thứ tự header để append rơi đúng cột (append ghi tuần tự từ cột A).
-            $rowOrdered = apps_gsheet_order_row($values, $with_keys ? $headers : []);
-
-            // Khóa per-spreadsheet (best-effort) — với append atomic thì ít cần, giữ để throttle ghi đua.
-            $writeLock = Cache::lock('gsheet_write:' . md5($ssId . '|' . $gid), 20);
-            $gotWriteLock = false;
-            try {
-                $gotWriteLock = $writeLock->block(12);
-            } catch (\Throwable $lockEx) {
-                // Không lấy được lock (timeout/driver) => vẫn ghi để KHÔNG mất lead; chấp nhận rủi ro đua hiếm.
-                Log::channel($logger)->warning(__FUNCTION__ . ': gsheet write lock not acquired, proceeding', [$lockEx->getMessage()]);
-            }
-            try {
-                // Ghi bằng append(INSERT_ROWS): Google tự tính dòng cuối SERVER-SIDE (atomic) => KHÔNG
-                // collision khi nhiều lead ghi dồn (queue burst). Khắc phục bug bản values.update A{count(A:A)+1}:
-                // đọc cột A bị stale do read-after-write lag của Google => mọi lead cùng tính targetRow=2 =>
-                // đè lên A2 (mất lead IM LẶNG cho MỌI khách). INSERT_ROWS chèn dòng vật lý (không OVERWRITE).
-                // Retry (apps_gsheet_write_with_retry): lỗi TẠM THỜI 503/500/429 -> backoff rồi thử lại
-                // (chống mất lead khi Google hiccup/tải cao); nhánh grid-limit gần như không kích hoạt vì
-                // append(INSERT_ROWS) tự nới grid.
-                $result = apps_gsheet_write_with_retry(
-                    fn() => Sheets::setAccessToken($accessToken)
-                        ->spreadsheet($ssId)
-                        ->sheetById($gid)
-                        ->append([$rowOrdered], 'RAW', 'INSERT_ROWS'),
-                    $accessToken,
-                    $ssId,
-                    (int) $gid,
-                    $logger
-                );
-
-                $writeSimple = (array) $result->toSimpleObject();
-            } finally {
-                // Reset range của Sheets (SINGLETON trong worker): code trên set ->range('A:A')/->range('A{n}'),
-                // nếu không xoá thì rò sang LẦN GỌI KẾ TIẾP -> đọc header bị nhầm range -> ghi hụt lead.
-                try {
-                    Sheets::range('');
-                } catch (\Throwable $resetEx) {
-                }
-                if ($gotWriteLock) {
-                    try {
-                        $writeLock->release();
-                    } catch (\Throwable $relEx) {
-                    }
-                }
-            }
+            // Log::channel($logger)->info('[GSheet Append::Done]', [
+            //     'result' => $result->toSimpleObject() ?? [],
+            // ]);
             #endregion Spreadsheet process data
-
-            // Verify Google THỰC SỰ đã ghi dòng (chống báo "synchronized" giả khi append trả 200 mà 0 dòng).
-            if (!apps_gsheet_append_succeeded($writeSimple)) {
-                Log::channel($logger)->error(__FUNCTION__ . ': append returned no updated rows for ' . $ssId, $writeSimple);
-                return json_encode([
-                    "error" => true,
-                    'code' => Response::HTTP_BAD_REQUEST,
-                    'statusCode' => Response::HTTP_BAD_REQUEST,
-                    "data" => [
-                        'workbookId' => $ssId,
-                        'sheetId' => $gid,
-                        'sheetName' => Arr::get($spreadsheet, 'sheet.name', null),
-                        ...$writeSimple
-                    ],
-                    "message" => "Google Sheets append returned no updated rows"
-                ]);
-            }
 
             return json_encode([
                 "error" => false,
                 'code' => Response::HTTP_OK,
                 'statusCode' => Response::HTTP_OK,
                 "data" => [
-                    'workbookId' => $ssId,
-                    'sheetId' => $gid,
+                    'workbookId' => Arr::get($spreadsheet, 'spreadsheet.id', null),
+                    'sheetId' => Arr::get($spreadsheet, 'sheet.id', null),
                     'sheetName' => Arr::get($spreadsheet, 'sheet.name', null),
-                    ...$writeSimple
+                    ...(array) $result->toSimpleObject()
                 ],
                 "message" => "Request has been successfully processed"
             ]);
