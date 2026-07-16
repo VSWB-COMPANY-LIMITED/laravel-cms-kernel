@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+- **[GDriveMirrorSync][lỗ hổng dữ liệu vô hình] Manifest `storage/app/gdrive-sync/unexportable/<folderTag>.md` — liệt kê file KHÔNG THỂ mirror + link tải tay.**
+  Trên dữ liệu thật: **29 file unique** (dedup theo Drive ID từ 74 entry qua 6 report) không bao giờ vào
+  được mirror — 19× quá lớn (>10MB, lớn nhất 76MB; giới hạn cứng của API `files.export`), 10× bị chủ file
+  khoá. Trước đây command vẫn in "✨ MIRROR SYNC COMPLETED" rồi kết thúc → muốn biết thiếu file nào phải
+  đào JSON report thủ công. Nay: manifest Markdown nhóm theo reason, sort size giảm dần, kèm link
+  `docs.google.com/...` build từ mimeType (không gọi API) để tải tay file >10MB. Console + log summary
+  (`unexportable_manifest`) trỏ thẳng tới file.
+  Key theo **folderTag + GHI ĐÈ** (khác `failed/` archive theo timestamp): mục đích là "hiện còn thiếu
+  file nào", không phải lịch sử từng lần chạy. Run nào folder hết permanent-fail → xoá manifest cũ.
+  Test: `tests/Unit/GDriveUnexportableManifestTest.php` (7 test, builder pure/static).
+
 ### Fixed
 - **[GDriveMirrorSync][🔴 retry vô ích cho lỗi 403 vĩnh viễn] Phân loại lỗi Drive theo `reason` JSON, không string-match message.**
   Phân tích 74 entry lỗi thật (6 report `storage/app/gdrive-sync/failed/*.json`): 100% là 403 vĩnh viễn

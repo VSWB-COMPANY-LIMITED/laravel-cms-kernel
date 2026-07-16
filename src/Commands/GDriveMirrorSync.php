@@ -157,6 +157,14 @@
  *                 KHÔNG retry vì retry vô ích/tốn thời gian) hoặc retryable (lỗi tạm thời —
  *                 network/5xx/quota). Chỉ giữ 10 report gần nhất trong thư mục failed/ (tự động
  *                 xoá report cũ hơn — tránh tích luỹ vô hạn).
+ *       • Manifest: storage/app/gdrive-sync/unexportable/<folderTag>.md — bản MỚI NHẤT của
+ *                 riêng folder đó (key theo folderTag, GHI ĐÈ mỗi lần chạy — KHÔNG archive theo
+ *                 timestamp như failed/ ở trên). Chỉ liệt kê item 'permanent' (lỗi KHÔNG BAO GIỜ
+ *                 tự khỏi), nhóm theo lý do, kèm link tải tay + đuôi file gợi ý. File >10MB
+ *                 (exportSizeLimitExceeded) PHẢI tải tay qua trình duyệt vì API files.export bị
+ *                 Google giới hạn cứng 10MB; file cannotExportFile/fileNotExportable (chủ khoá)
+ *                 thì không tải được bằng cách nào, kể cả thủ công. Nếu run sau folder không còn
+ *                 permanent-fail (đã vá) → manifest cũ tự bị XOÁ.
  *
  *  ── RETRY WORKFLOW
  *     php artisan gdrive:mirror:sync \
@@ -260,6 +268,15 @@
  *  (0 items, service-account path bị skip, deep-check mimeType lỗi) — để chạy qua cron
  *  vẫn truy vết được thay vì chỉ mất vào console.
  *
+ *  Nếu có file permanent-fail (KHÔNG BAO GIỜ mirror được — vd quá 10MB hoặc bị khoá), console
+ *  in thêm 1 dòng cảnh báo trỏ tới manifest người-đọc-được:
+ *    storage/app/gdrive-sync/unexportable/<folderTag>.md
+ *  Khác với JSON report ở trên (archive theo timestamp, phải tự tìm bản mới nhất), manifest
+ *  này LUÔN LÀ BẢN MỚI NHẤT của folder (ghi đè mỗi lần chạy, tự xoá khi hết lỗi) — mở lên là
+ *  biết ngay hiện đang thiếu file nào, không cần đào JSON. File >10MB (exportSizeLimitExceeded)
+ *  là giới hạn CỨNG của API files.export, chỉ tải được bằng tay qua trình duyệt (link kèm sẵn
+ *  trong manifest); file bị chủ khoá (cannotExportFile) thì không cách nào tải được, kể cả tay.
+ *
  * ============================================================
  */
 
@@ -300,6 +317,13 @@ class GDriveMirrorSync extends Command
     protected int $lastAttempts = 0;
     protected ?string $serviceAccountFile = null;
     protected string $runId = '';
+
+    /**
+     * Set trong handle() ngay khi resolve xong — writeUnexportableManifest() cần base path
+     * cho header manifest nhưng chữ ký method (đã chốt) không nhận nó làm tham số, nên đi
+     * qua property thay vì truyền thêm arg.
+     */
+    protected string $baseLocalPath = '';
 
     /**
      * Số report JSON tối đa giữ lại trong storage/app/gdrive-sync/failed/ — tự prune report
@@ -403,6 +427,7 @@ class GDriveMirrorSync extends Command
             $rawPath = $this->option('path')
                 ?: ($preloadedItems !== null && ! empty($json['base_local_path']) ? $json['base_local_path'] : storage_path('app/google_drive_mirror'));
             $baseLocalPath = realpath($rawPath) ?: $rawPath;
+            $this->baseLocalPath = $baseLocalPath;
             $googleDisk = Storage::disk("google_drive_mirror");
 
             if ($preloadedItems !== null) {
@@ -1069,6 +1094,12 @@ class GDriveMirrorSync extends Command
         }
         $durationSec = $startedAt > 0 ? round(microtime(true) - $startedAt, 2) : null;
 
+        // Manifest KHÔNG-thể-mirror: tính TRƯỚC log summary (để log summary có path) và luôn
+        // gọi (kể cả failed_files rỗng) — folder trước đó có permanent-fail nhưng run này đã
+        // hết lỗi thì manifest cũ phải được XOÁ, không chỉ khi có lỗi mới.
+        $folderTag = $targetIdentifiers ? substr(md5(implode(',', $targetIdentifiers)), 0, 8) : 'unknown';
+        $unexportableManifestPath = $this->writeUnexportableManifest($stats['failed_files'], $folderTag, $targetIdentifiers);
+
         $this->info("\n" . str_repeat("=", 50));
         $this->info("✨ MIRROR SYNC COMPLETED");
         $this->info(str_repeat("=", 50));
@@ -1089,6 +1120,7 @@ class GDriveMirrorSync extends Command
             'permanent_count' => $permanentCount,
             'path'    => $baseLocalPath,
             'duration_sec' => $durationSec,
+            'unexportable_manifest' => $unexportableManifestPath,
         ]);
 
         if (!empty($stats['failed_files'])) {
@@ -1125,6 +1157,11 @@ class GDriveMirrorSync extends Command
                 'failed_files' => $stats['failed_files'],
                 'report_path' => $reportPath ?? null,
             ]);
+        }
+
+        if ($unexportableManifestPath) {
+            $this->warn("\n⚠️  {$permanentCount} file KHÔNG THỂ mirror (permanent) — chi tiết + link tải tay:");
+            $this->warn("   {$unexportableManifestPath}");
         }
 
         $this->info("\n" . str_repeat("=", 50));
@@ -1213,9 +1250,160 @@ class GDriveMirrorSync extends Command
     }
 
     /**
-     * Format bytes for human display.
+     * Ghi manifest Markdown liệt kê file KHÔNG THỂ mirror (permanent) cho một folder — dùng để
+     * biết cần tải file nào bằng tay (kèm link) mà không phải đào JSON report thủ công.
+     *
+     * 🔴 Key theo `$folderTag` (KHÔNG theo timestamp như `failed/`) và LUÔN GHI ĐÈ: mục đích của
+     * file này là phản ánh TRẠNG THÁI MỚI NHẤT của folder ("hiện còn thiếu file nào"), không phải
+     * lưu lịch sử từng lần chạy như `failed/` (archive theo timestamp, giữ 10 bản gần nhất).
+     * Nếu archive theo timestamp thì user phải tự tìm bản mới nhất — đánh mất mục đích "manifest
+     * luôn cập nhật, mở lên là biết ngay" mà yêu cầu ban đầu đặt ra.
+     *
+     * Nếu run này KHÔNG còn permanent-fail nào cho folder → xoá manifest cũ (nếu có), vì lỗ hổng
+     * dữ liệu đã được vá (file trước đó lỗi permanent nay đã mirror được, hoặc bị xoá khỏi Drive).
+     *
+     * @return string|null path manifest vừa ghi (có permanent-fail), hoặc null nếu không có gì
+     *                      để ghi (kể cả trường hợp vừa xoá manifest cũ) hoặc ghi/xoá lỗi.
      */
-    protected function humanSize(int $bytes): string
+    protected function writeUnexportableManifest(array $failedFiles, string $folderTag, array $targetIdentifiers): ?string
+    {
+        $manifestDir = storage_path('app/gdrive-sync/unexportable');
+        $manifestPath = $manifestDir . DIRECTORY_SEPARATOR . $folderTag . '.md';
+
+        $permanentItems = array_values(array_filter($failedFiles, fn ($f) => ! empty($f['permanent'])));
+
+        if (empty($permanentItems)) {
+            if (is_file($manifestPath) && ! @unlink($manifestPath)) {
+                $this->warn("⚠️  Could not remove stale unexportable manifest: {$manifestPath}");
+            }
+            return null;
+        }
+
+        if (! is_dir($manifestDir) && ! @mkdir($manifestDir, 0755, true) && ! is_dir($manifestDir)) {
+            $this->warn("⚠️  Could not create unexportable manifest dir: {$manifestDir}");
+            return null;
+        }
+
+        $content = self::buildUnexportableManifest($permanentItems, [
+            'generated_at' => date('c'),
+            'run_id' => $this->runId,
+            'folder_ids' => array_values($targetIdentifiers),
+            'base_local_path' => $this->baseLocalPath,
+        ]);
+
+        if (@file_put_contents($manifestPath, $content) === false) {
+            $this->warn("⚠️  Could not write unexportable manifest: {$manifestPath}");
+            return null;
+        }
+
+        return $manifestPath;
+    }
+
+    /**
+     * Build nội dung Markdown của manifest "file không thể mirror". Pure/static (không đụng
+     * facade/`$this`) để unit test được mà không cần boot Laravel.
+     *
+     * Tự lọc lại `permanent === true` NGAY TRONG method (không tin tưởng mù caller đã lọc đúng)
+     * — item retryable lọt vào input vẫn KHÔNG được xuất hiện trong manifest, vì manifest này
+     * chỉ dành cho lỗi vĩnh viễn (retryable có thể tự khỏi ở lần chạy sau, đưa vào sẽ gây nhiễu).
+     *
+     * @param array<int, array<string, mixed>> $permanentItems item từ $stats['failed_files']
+     *        (mỗi item: path, id, mimeType, size, category, error_reason, permanent, …)
+     * @param array{generated_at: string, run_id: string, folder_ids: array, base_local_path: string} $meta
+     * @return string Markdown, hoặc chuỗi rỗng nếu không có item permanent nào (caller không ghi file).
+     */
+    public static function buildUnexportableManifest(array $permanentItems, array $meta): string
+    {
+        $items = array_values(array_filter($permanentItems, fn ($f) => ! empty($f['permanent'])));
+        if (empty($items)) {
+            return '';
+        }
+
+        // Nhóm theo error_reason (fallback 'category' nếu thiếu reason) — giữ THỨ TỰ nhóm xuất
+        // hiện đầu tiên trong input, không sort alphabet, để khớp yêu cầu "đúng thứ tự nhóm".
+        $groups = [];
+        foreach ($items as $item) {
+            $key = $item['error_reason'] ?? ($item['category'] ?? 'other');
+            $groups[$key][] = $item;
+        }
+
+        // Sort giảm dần theo size TRONG từng nhóm.
+        foreach ($groups as $key => $groupItems) {
+            usort($groupItems, fn ($a, $b) => (int) ($b['size'] ?? 0) <=> (int) ($a['size'] ?? 0));
+            $groups[$key] = $groupItems;
+        }
+
+        // Hướng dẫn xử lý riêng cho 2 reason đã biết chắc (khớp classifyDriveError permanentReasons).
+        // Reason khác → chỉ dùng category làm tiêu đề, KHÔNG có ghi chú hướng dẫn riêng.
+        $reasonNotes = [
+            'exportSizeLimitExceeded' => 'QUÁ LỚN để export qua API (giới hạn 10MB của `files.export`) — **tải tay qua trình duyệt được**.',
+            'cannotExportFile' => 'Bị chủ file KHOÁ — không tải được bằng cách nào, kể cả thủ công.',
+            'fileNotExportable' => 'Bị chủ file KHOÁ — không tải được bằng cách nào, kể cả thủ công.',
+        ];
+
+        $lines = [];
+        $lines[] = '# File KHÔNG THỂ mirror (permanent)';
+        $lines[] = '';
+        $lines[] = '- Sinh lúc: ' . ($meta['generated_at'] ?? '-');
+        $lines[] = '- Run ID: ' . ($meta['run_id'] ?? '-');
+        $lines[] = '- Folder ID(s): ' . (! empty($meta['folder_ids']) ? implode(', ', (array) $meta['folder_ids']) : '-');
+        $lines[] = '- Base local path: ' . ($meta['base_local_path'] ?? '-');
+        $lines[] = '- Tổng số file: ' . count($items);
+        $lines[] = '';
+
+        foreach ($groups as $reasonKey => $groupItems) {
+            $categoryLabel = $groupItems[0]['category'] ?? $reasonKey;
+            $count = count($groupItems);
+            $lines[] = "## {$categoryLabel} ({$count} file" . ($count > 1 ? 's' : '') . ')';
+            $lines[] = '';
+            if (isset($reasonNotes[$reasonKey])) {
+                $lines[] = $reasonNotes[$reasonKey];
+                $lines[] = '';
+            }
+
+            foreach ($groupItems as $item) {
+                $size = self::humanSize((int) ($item['size'] ?? 0));
+                $path = $item['path'] ?? '?';
+                $lines[] = "- [{$size}] {$path}";
+
+                $id = $item['id'] ?? null;
+                if ($id) {
+                    [$url, $ext] = self::buildManualDownloadUrl((string) $id, (string) ($item['mimeType'] ?? ''), $path);
+                    $lines[] = "  → {$url}  (tải .{$ext})";
+                }
+            }
+            $lines[] = '';
+        }
+
+        return rtrim(implode("\n", $lines)) . "\n";
+    }
+
+    /**
+     * Suy URL tải tay từ id + mimeType — KHÔNG gọi API Google (cả 2 field đã có sẵn trong item
+     * từ lần list/lỗi trước đó). Google Native (Docs/Sheets/Slides/Drawings) mở đúng app web,
+     * tải nguyên bản mở bằng link file thường.
+     *
+     * @return array{0: string, 1: string} [url, phần mở rộng gợi ý khi tải]
+     */
+    protected static function buildManualDownloadUrl(string $id, string $mimeType, string $path = ''): array
+    {
+        return match ($mimeType) {
+            'application/vnd.google-apps.presentation' => ["https://docs.google.com/presentation/d/{$id}", 'pptx'],
+            'application/vnd.google-apps.document' => ["https://docs.google.com/document/d/{$id}", 'docx'],
+            'application/vnd.google-apps.spreadsheet' => ["https://docs.google.com/spreadsheets/d/{$id}", 'xlsx'],
+            'application/vnd.google-apps.drawing' => ["https://docs.google.com/drawings/d/{$id}", 'png'],
+            // File thường (không phải Google Native): giữ nguyên bản, không convert qua export
+            // API — suy đuôi file từ path gốc thay vì đoán từ mimeType (chính xác hơn, không cần map).
+            default => ["https://drive.google.com/file/d/{$id}", pathinfo($path, PATHINFO_EXTENSION) ?: 'file'],
+        };
+    }
+
+    /**
+     * Format bytes for human display.
+     * Static (không dùng $this) để buildUnexportableManifest() — method static/pure cho
+     * unit test không boot Laravel — gọi lại được qua self::humanSize().
+     */
+    protected static function humanSize(int $bytes): string
     {
         if ($bytes <= 0) return '-';
         $units = ['B', 'KB', 'MB', 'GB', 'TB'];
