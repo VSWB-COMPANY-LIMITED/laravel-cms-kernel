@@ -222,6 +222,19 @@ class GDriveErrorClassificationTest extends TestCase
                 'Other',
                 true,
             ],
+            // 🔴 HỒI QUY (2026-07-16): body JSON THẬT copy nguyên văn từ file rác 420 byte bị
+            // streamDownloadViaApi() ghi thẳng lên đĩa — Google trả 403 fileNotDownloadable cho
+            // shortcut/Docs-Editors file, nhưng Guzzle RAW (http_errors=false) không throw nên
+            // JSON lỗi này bị coi là nội dung file rồi báo "Errors encountered: 0". Trước khi có
+            // fix, reason 'fileNotDownloadable' không nằm trong allowlist permanent → nếu có
+            // throw đúng thì vẫn bị coi retryable, tốn backoff vô ích cho lỗi KHÔNG BAO GIỜ tự khỏi.
+            'fileNotDownloadable (real body — shortcut/Docs Editors, 403)' => [
+                <<<'JSON'
+                {"error":{"code":403,"message":"Only files with binary content can be downloaded. Use Export with Docs Editors files.","errors":[{"message":"Only files with binary content can be downloaded. Use Export with Docs Editors files.","domain":"global","reason":"fileNotDownloadable"}]}}
+                JSON,
+                'Not downloadable (Docs Editors/shortcut)',
+                false,
+            ],
         ];
     }
 
@@ -246,5 +259,34 @@ class GDriveErrorClassificationTest extends TestCase
         $this->assertSame('Not exportable (locked/unsupported)', $result['category']);
         $this->assertFalse($result['retryable']);
         $this->assertSame('cannotExportFile', $result['reason']);
+    }
+
+    /**
+     * Bảo vệ GDriveMirrorSync::assertDownloadOk() — helper pure/static tách ra từ
+     * streamDownloadViaApi() để kiểm status code tay (Guzzle RAW dùng bởi Google client có
+     * 'http_errors' => false nên KHÔNG tự throw ở 4xx/5xx, xem comment tại streamDownloadViaApi()).
+     */
+    public function test_assert_download_ok_does_not_throw_on_200(): void
+    {
+        GDriveMirrorSync::assertDownloadOk(200, '');
+        $this->addToAssertionCount(1); // không throw = pass
+    }
+
+    public function test_assert_download_ok_throws_with_reason_on_403(): void
+    {
+        $body = '{"error":{"code":403,"message":"Only files with binary content can be downloaded. Use Export with Docs Editors files.","errors":[{"message":"Only files with binary content can be downloaded. Use Export with Docs Editors files.","domain":"global","reason":"fileNotDownloadable"}]}}';
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage($body);
+
+        try {
+            GDriveMirrorSync::assertDownloadOk(403, $body);
+        } catch (\RuntimeException $e) {
+            // Message ném ra phải parse được qua classifyDriveError() y hệt luồng withRetry().
+            $classified = GDriveMirrorSync::classifyDriveError($e->getMessage());
+            $this->assertSame('fileNotDownloadable', $classified['reason']);
+            $this->assertFalse($classified['retryable']);
+            throw $e;
+        }
     }
 }

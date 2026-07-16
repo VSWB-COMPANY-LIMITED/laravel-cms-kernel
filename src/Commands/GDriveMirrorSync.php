@@ -251,6 +251,15 @@
  *
  *  File thông thường (PDF, JPG, MP4, ZIP…) được tải nguyên bản.
  *
+ *  ⚠️ Google native type NGOÀI danh sách trên (shortcut, Forms, Sites, My Maps, Jamboard…)
+ *  KHÔNG tải được qua API:
+ *    - application/vnd.google-apps.shortcut → BỊ SKIP CÓ CHỦ ĐÍCH (không phải lỗi): shortcut
+ *      chỉ là con trỏ, KHÔNG có nội dung riêng — target thật của nó luôn được Drive liệt kê
+ *      như 1 item độc lập trong cùng listing và sync bình thường ở đó.
+ *    - Các loại khác (form/site/map/jam...) → báo lỗi permanent 'fileNotDownloadable'
+ *      (KHÔNG BAO GIỜ tự khỏi, không retry) và được liệt kê vào manifest
+ *      storage/app/gdrive-sync/unexportable/<folderTag>.md.
+ *
  * ============================================================
  *  OUTPUT VÀ LOG
  * ============================================================
@@ -636,7 +645,7 @@ class GDriveMirrorSync extends Command
                             try {
                                 /** @var mixed $googleDisk */
                                 $service = $googleDisk->getAdapter()->getService();
-                                $fileMeta = $service->files->get($fileId, ['fields' => 'id, name, mimeType, md5Checksum']);
+                                $fileMeta = $service->files->get($fileId, ['fields' => 'id, name, mimeType, md5Checksum, shortcutDetails']);
                                 $mimeType = $fileMeta->getMimeType();
                                 $remoteMd5 = $fileMeta->getMd5Checksum();
                                 $exportSpec = $this->exportMap[$mimeType] ?? null;
@@ -649,6 +658,25 @@ class GDriveMirrorSync extends Command
                                     'error' => $e->getMessage(),
                                 ]);
                             }
+                        }
+
+                        // Shortcut = con trỏ tới file thật, KHÔNG có nội dung riêng — GET nó trả
+                        // JSON lỗi 403 "Only files with binary content can be downloaded" (reason
+                        // fileNotDownloadable) mà KHÔNG throw ở đường raw-Guzzle (xem
+                        // streamDownloadViaApi()), nên trước đây bị ghi thẳng lên đĩa như file rác
+                        // rồi báo "thành công". Target thật của shortcut được Drive liệt kê như 1
+                        // item độc lập trong cùng listing (đã verify: file thật cùng tên vẫn
+                        // export/tải đúng) → bỏ qua an toàn, không mất dữ liệu.
+                        if ($mimeType === 'application/vnd.google-apps.shortcut') {
+                            $stats['skipped']++;
+                            Log::channel($this->log_channel)->info("GDrive Sync: skipped shortcut (pointer, not content)", [
+                                'run_id' => $this->runId,
+                                'path' => $relativePath,
+                                'id' => $fileId,
+                                'shortcut_target_mime' => $this->extractShortcutTargetMime($meta, $fileMeta),
+                            ]);
+                            $bar->advance();
+                            continue;
                         }
 
                         if ($exportSpec) {
@@ -710,6 +738,13 @@ class GDriveMirrorSync extends Command
                                 /** @var mixed $googleDisk */
                                 $service = $googleDisk->getAdapter()->getService();
                                 $this->line("\n   ✨ Exporting Google Native: " . basename($targetLocalPath));
+                                // AN TOÀN (đã verify bằng đọc code thật, không phải đoán): $service->files->export()
+                                // là lời gọi generated qua Google\Service\Resource::call() → Client::execute() →
+                                // Http\REST::execute() → REST::decodeHttpResponse(), nơi CÓ check
+                                // `if ($code >= 400) throw new GoogleServiceException($body, $code, ...)`.
+                                // Khác với streamDownloadViaApi() (dùng Guzzle RAW, http_errors=false, không tự
+                                // throw), nhánh export này KHÔNG cần check status tay — lỗi (kể cả 403
+                                // fileNotDownloadable/cannotExportFile) đã throw đúng để withRetry() bắt được.
                                 $response = $service->files->export($fileId, $exportSpec['mime'], ['alt' => 'media']);
                                 File::put($targetLocalPath, $response->getBody()->getContents());
                             } elseif ($useApi) {
@@ -886,6 +921,7 @@ class GDriveMirrorSync extends Command
             'appNotAuthorizedToFile' => 'Permission denied',
             'domainPolicy' => 'Permission denied',
             'forbidden' => 'Permission denied',
+            'fileNotDownloadable' => 'Not downloadable (Docs Editors/shortcut)',
         ];
         if ($reason !== null && isset($permanentReasons[$reason])) {
             return ['category' => $permanentReasons[$reason], 'retryable' => false, 'reason' => $reason];
@@ -1010,8 +1046,23 @@ class GDriveMirrorSync extends Command
         $url = sprintf('https://www.googleapis.com/drive/v3/files/%s?alt=media&supportsAllDrives=true', urlencode($fileId));
 
         $response = $httpClient->request('GET', $url, ['stream' => true]);
-        $body = $response->getBody();
+        $status = $response->getStatusCode();
 
+        // 🔴 Request này đi thẳng qua Guzzle RAW (KHÔNG qua Resource::call()/
+        // REST::decodeHttpResponse() — nơi google/apiclient tự check status + throw
+        // Google\Service\Exception). Google\Client::createDefaultHttpClient() set
+        // 'http_errors' => false khi dựng Guzzle client, nên Guzzle IM LẶNG ở 4xx/5xx thay vì
+        // ném exception. Bug thực tế: 403 "Only files with binary content can be downloaded"
+        // (shortcut/Docs-Editors) bị ghi thẳng JSON lỗi lên đĩa như thể là nội dung file thật,
+        // rồi command báo "thành công". Phải tự kiểm status tay ở đây.
+        if ($status < 200 || $status >= 300) {
+            // Giới hạn 8KB — đủ chứa JSON lỗi của Google, không tốn RAM đọc hết body khi lỗi.
+            self::assertDownloadOk($status, substr((string) $response->getBody(), 0, 8192));
+        }
+
+        // 🔴 fopen(..., 'w') TRUNCATE file về 0 byte ngay lập tức — CHỈ được mở SAU khi đã xác
+        // nhận status OK ở trên. Mở trước sẽ phá file local tốt sẵn có thành rỗng nếu request lỗi.
+        $body = $response->getBody();
         $writeStream = fopen($targetLocalPath, 'w');
         try {
             while (! $body->eof()) {
@@ -1020,6 +1071,24 @@ class GDriveMirrorSync extends Command
         } finally {
             fclose($writeStream);
         }
+    }
+
+    /**
+     * Kiểm status code của response tải qua streamDownloadViaApi() và ném lỗi nếu KHÔNG phải
+     * 2xx. Tách riêng pure/static (không đụng $this/facade) để unit test được mà không cần
+     * dựng response HTTP thật — xem GDriveErrorClassificationTest.
+     *
+     * Message ném ra là RAW BODY (JSON lỗi của Google) để classifyDriveError() parse được
+     * `error.errors[0].reason` — giữ đúng contract với withRetry()/finalReport() đang dùng.
+     *
+     * @throws \RuntimeException khi $statusCode không phải 2xx
+     */
+    public static function assertDownloadOk(int $statusCode, string $body): void
+    {
+        if ($statusCode >= 200 && $statusCode < 300) {
+            return;
+        }
+        throw new \RuntimeException($body);
     }
 
     /**
@@ -1396,6 +1465,33 @@ class GDriveMirrorSync extends Command
             // API — suy đuôi file từ path gốc thay vì đoán từ mimeType (chính xác hơn, không cần map).
             default => ["https://drive.google.com/file/d/{$id}", pathinfo($path, PATHINFO_EXTENSION) ?: 'file'],
         };
+    }
+
+    /**
+     * Best-effort đọc `shortcutDetails.targetMimeType` từ metadata shortcut — CHỈ dùng cho
+     * log/troubleshoot (log skip shortcut), không ảnh hưởng quyết định skip. `$meta` (item gốc từ
+     * masbug listContents) và `$fileMeta` (kết quả deep-check `files->get`, nếu có) đều có thể
+     * KHÔNG chứa field này (field list hiện tại không phải lúc nào cũng request 'shortcutDetails')
+     * → trả null thay vì lỗi khi thiếu.
+     */
+    protected function extractShortcutTargetMime($meta, $fileMeta = null): ?string
+    {
+        if (is_object($fileMeta) && method_exists($fileMeta, 'getShortcutDetails')) {
+            $details = $fileMeta->getShortcutDetails();
+            if ($details && method_exists($details, 'getTargetMimeType')) {
+                return $details->getTargetMimeType();
+            }
+        }
+        if (is_object($meta) && method_exists($meta, 'getShortcutDetails')) {
+            $details = $meta->getShortcutDetails();
+            if ($details && method_exists($details, 'getTargetMimeType')) {
+                return $details->getTargetMimeType();
+            }
+        }
+        if (is_array($meta)) {
+            return $meta['shortcutDetails']['targetMimeType'] ?? null;
+        }
+        return null;
     }
 
     /**

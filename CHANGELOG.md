@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Fixed
+- **[GDriveMirrorSync][🔴🔴 GHI RÁC LÊN ĐĨA + BÁO THÀNH CÔNG] `streamDownloadViaApi()` không kiểm HTTP status.**
+  Phát hiện khi chạy sync THẬT folder "Accounting" (2719 item): file
+  `Chi_Phi_LuongNhanVien/LUONG LAP TRINH  EHOADON 247` (420 byte) chứa **JSON lỗi 403 của Google**
+  (`fileNotDownloadable`) thay vì nội dung — mà run vẫn báo `❌ Errors encountered: 0`.
+  Chuỗi nhân quả: file là `google-apps.shortcut` → không có trong `$exportMap` → bị coi là file nhị
+  phân → `streamDownloadViaApi()` ghi thẳng body ra đĩa KHÔNG check status; `google/apiclient` set
+  `http_errors=false` (Client.php:1265) nên Guzzle KHÔNG throw ở 4xx → `withRetry()` trả true →
+  đếm là updated → `touch(mtime remote)` → delta-check lần sau (native không có md5 → so mtime) →
+  **SKIP vĩnh viễn**. Rác tự bảo tồn, không bao giờ tự lành.
+  ⚠️ Hệ quả: toàn bộ `classifyDriveError()` bị ĐI VÒNG QUA — nó chỉ chạy khi có exception.
+  Fix: `assertDownloadOk()` (pure/static) check status → throw raw body → `classifyDriveError()` parse
+  được reason. `fopen(...,'w')` chuyển xuống SAU check (nó truncate ngay lập tức → mở trước sẽ phá
+  file tốt thành rỗng khi request lỗi). `files->export()` đã throw sẵn qua `REST::decodeHttpResponse()`
+  → xác minh bằng đọc code, không sửa thừa.
+- **[GDriveMirrorSync] `fileNotDownloadable` → permanent** (`Not downloadable (Docs Editors/shortcut)`).
+
+### Added
+- **[GDriveMirrorSync] Bỏ qua `google-apps.shortcut` trước khi tải** — shortcut là con trỏ, không phải
+  nội dung; target của nó được sync riêng như file độc lập (kiểm chứng: spreadsheet thật cùng tên vẫn
+  export đúng ra .xlsx 226KB). Skip + log info kèm run_id/path/shortcut_target_mime.
+
+
 ### Added
 - **[GDriveMirrorSync][lỗ hổng dữ liệu vô hình] Manifest `storage/app/gdrive-sync/unexportable/<folderTag>.md` — liệt kê file KHÔNG THỂ mirror + link tải tay.**
   Trên dữ liệu thật: **29 file unique** (dedup theo Drive ID từ 74 entry qua 6 report) không bao giờ vào
