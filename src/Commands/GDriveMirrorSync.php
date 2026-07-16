@@ -107,6 +107,9 @@
  *      [--dry-run]                  Chỉ liệt kê 20 item đầu (debug), KHÔNG tải
  *      [--limit=<n>]                Chỉ xử lý N item đầu tiên (test)
  *      [--retry-failed=<json>]      Re-run chỉ các file lỗi từ JSON report của lần chạy trước
+ *                                    (mặc định BỎ QUA item lỗi permanent — 403 vĩnh viễn)
+ *      [--include-permanent]        Dùng cùng --retry-failed: nạp CẢ item permanent (bình thường
+ *                                    bị bỏ qua vì retry vô ích, vd exportSizeLimitExceeded)
  *
  *  ── KHI FILE LOCAL ĐÃ TỒN TẠI (skip vs re-download)
  *
@@ -147,16 +150,22 @@
  *  ── BÁO CÁO FILE LỖI
  *     Sau mỗi lần chạy, nếu có file lỗi:
  *       • Console: in group theo loại lỗi (Permission / Network / Quota / Export Limit / …)
- *       • Log:    storage/logs/laravel-YYYY-MM-DD.log (channel "daily")
+ *       • Log:    storage/logs/pull.vn-YYYY-MM-DD.log (channel "daily")
  *       • JSON:   storage/app/gdrive-sync/failed/failed-<folderTag>-<YYYYmmdd-HHMMSS>.json
- *                 → file này có đủ meta để re-run qua --retry-failed.
+ *                 → file này có đủ meta để re-run qua --retry-failed. Mỗi item được phân loại
+ *                 'permanent' (lỗi 403 vĩnh viễn — vd exportSizeLimitExceeded/cannotExportFile,
+ *                 KHÔNG retry vì retry vô ích/tốn thời gian) hoặc retryable (lỗi tạm thời —
+ *                 network/5xx/quota). Chỉ giữ 10 report gần nhất trong thư mục failed/ (tự động
+ *                 xoá report cũ hơn — tránh tích luỹ vô hạn).
  *
  *  ── RETRY WORKFLOW
  *     php artisan gdrive:mirror:sync \
  *         --retry-failed="storage/app/gdrive-sync/failed/failed-xxxxxxxx-20260528-103000.json" \
  *         --path="/Volumes/WD-DATA1/OneDrive"
  *     (--retry-failed tự skip phần list, chỉ download các item trong JSON.
- *      --path nếu bỏ trống sẽ dùng base_local_path lưu trong JSON.)
+ *      --path nếu bỏ trống sẽ dùng base_local_path lưu trong JSON.
+ *      Mặc định CHỈ nạp item retryable (bỏ qua item 'permanent' — retry vô ích, vd file
+ *      >10MB không export được hoặc bị Google lock). Thêm --include-permanent để nạp cả 2 loại.)
  *
  * ============================================================
  *  VÍ DỤ SỬ DỤNG
@@ -245,8 +254,11 @@
  *    ⚠  Collisions       — Số file trùng tên (đã tự xử lý bằng cách thêm Drive ID)
  *    ❌ Errors            — Số file thất bại kèm lý do
  *
- *  Log chi tiết ghi vào channel "daily" (storage/logs/laravel-YYYY-MM-DD.log).
- *  Danh sách file lỗi được log riêng để tiện manual retry.
+ *  Log chi tiết ghi vào channel "daily" (storage/logs/pull.vn-YYYY-MM-DD.log).
+ *  Danh sách file lỗi được log riêng để tiện manual retry. Mỗi lần chạy có 1 run_id
+ *  (uniqid ngắn) gắn vào mọi log entry của run đó — kể cả các nhánh skip im lặng trước đây
+ *  (0 items, service-account path bị skip, deep-check mimeType lỗi) — để chạy qua cron
+ *  vẫn truy vết được thay vì chỉ mất vào console.
  *
  * ============================================================
  */
@@ -275,7 +287,8 @@ class GDriveMirrorSync extends Command
         {--path= : Custom local storage path (defaults to storage/app/google_drive_mirror)}
         {--dry-run : List remote items only, do NOT download. Prints first 20 items as a table for debugging}
         {--limit=0 : Only process first N items (0 = all). Useful for testing}
-        {--retry-failed= : Path to a failed-report JSON (from a previous run); re-downloads only those items, skipping list/scan}';
+        {--retry-failed= : Path to a failed-report JSON (from a previous run); re-downloads only those items, skipping list/scan}
+        {--include-permanent : With --retry-failed, also re-attempt items marked permanent (403 vĩnh viễn — retry vô ích by default, skip)}';
 
     /**
      * The console command description.
@@ -286,6 +299,13 @@ class GDriveMirrorSync extends Command
     protected $lastError = null;
     protected int $lastAttempts = 0;
     protected ?string $serviceAccountFile = null;
+    protected string $runId = '';
+
+    /**
+     * Số report JSON tối đa giữ lại trong storage/app/gdrive-sync/failed/ — tự prune report
+     * cũ hơn sau mỗi lần ghi để tránh tích luỹ vô hạn (command chạy qua cron định kỳ).
+     */
+    protected const MAX_FAILED_REPORTS = 10;
 
     /**
      * Google Native MimeTypes to Microsoft Office (OpenXML) Formats
@@ -318,6 +338,8 @@ class GDriveMirrorSync extends Command
     public function handle()
     {
         set_time_limit(0);
+        $startedAt = microtime(true);
+        $this->runId = substr(uniqid(), -8);
 
         try {
             // 1. Initial Checks
@@ -326,6 +348,19 @@ class GDriveMirrorSync extends Command
                 $this->warn("⚠️ GDrive Mirror Sync is disabled.");
                 return Command::FAILURE;
             }
+
+            // Log START ngay khi chắc chắn sẽ chạy — chạy qua cron thì đây là bằng chứng
+            // duy nhất command thực sự có khởi động (console output không ai xem).
+            Log::channel($this->log_channel)->info("GDrive Mirror Sync STARTED", [
+                'run_id' => $this->runId,
+                'folders' => (array) $this->argument('folders'),
+                'path' => $this->option('path'),
+                'force' => (bool) $this->option('force'),
+                'retry_failed' => (string) $this->option('retry-failed'),
+                'dry_run' => (bool) $this->option('dry-run'),
+                'limit' => (int) $this->option('limit'),
+                'mode' => $this->resolveServiceAccountFile() ? 'service_account' : 'oauth2',
+            ]);
 
             // 2. Prepare Dynamic Disk Configuration
             $this->initGoogleDisk(null, 'google_drive_mirror');
@@ -344,7 +379,25 @@ class GDriveMirrorSync extends Command
                     return Command::FAILURE;
                 }
                 $preloadedItems = $json['items'];
-                $this->info("\n🔁 RETRY-FAILED mode: loaded " . count($preloadedItems) . " item(s) from " . basename($retryFailedPath));
+                $totalLoaded = count($preloadedItems);
+                $this->info("\n🔁 RETRY-FAILED mode: loaded {$totalLoaded} item(s) from " . basename($retryFailedPath));
+
+                // Mặc định CHỈ nạp item retryable — permanent (403 vĩnh viễn: file quá lớn để
+                // export, file bị lock…) sẽ KHÔNG BAO GIỜ tự khỏi, retry lại chỉ tốn thời gian.
+                // Item cũ không có field 'permanent' (report từ trước khi có phân loại này) =
+                // coi như retryable, để không âm thầm bỏ sót (backward-compat).
+                if (! $this->option('include-permanent')) {
+                    $skipped = array_filter($preloadedItems, fn ($item) => ! empty($item['permanent']));
+                    if (! empty($skipped)) {
+                        $preloadedItems = array_values(array_filter($preloadedItems, fn ($item) => empty($item['permanent'])));
+                        $this->warn("⏭️  Skipped " . count($skipped) . " permanent item(s) (use --include-permanent to force retry).");
+                    }
+                }
+
+                if (empty($preloadedItems)) {
+                    $this->info("Nothing left to retry after filtering permanent errors.");
+                    return Command::SUCCESS;
+                }
             }
 
             $rawPath = $this->option('path')
@@ -402,6 +455,11 @@ class GDriveMirrorSync extends Command
                     $exploringPath = '';
                 } elseif ($this->serviceAccountFile && !$isId) {
                     $this->warn("\n⚠️ Skipping '{$identifier}': service account mode requires a Folder ID, not a path.");
+                    // Skip im lặng trước đây = mất dấu vết khi chạy qua cron (không ai xem console).
+                    Log::channel($this->log_channel)->warning("GDrive Sync: skipped identifier (service account mode requires Folder ID, not path)", [
+                        'run_id' => $this->runId,
+                        'identifier' => $identifier,
+                    ]);
                     continue;
                 } elseif ($isId) {
                     $this->info("\n🚀 RESOLVING PATH FOR GOOGLE DRIVE ID: {$identifier}");
@@ -466,6 +524,12 @@ class GDriveMirrorSync extends Command
                 $this->info("Found {$totalItems} items.");
 
                 if ($totalItems === 0) {
+                    // Im lặng trước đây → false-green khi chạy cron (list rỗng có thể là bug
+                    // thật: quyền bị thu hồi, ID sai, folder bị xoá — không chỉ "folder trống").
+                    Log::channel($this->log_channel)->warning("GDrive Sync: 0 remote items found for identifier", [
+                        'run_id' => $this->runId,
+                        'identifier' => $identifier,
+                    ]);
                     continue;
                 }
 
@@ -551,7 +615,15 @@ class GDriveMirrorSync extends Command
                                 $mimeType = $fileMeta->getMimeType();
                                 $remoteMd5 = $fileMeta->getMd5Checksum();
                                 $exportSpec = $this->exportMap[$mimeType] ?? null;
-                            } catch (\Throwable $e) {}
+                            } catch (\Throwable $e) {
+                                // Nuốt lỗi trước đây → mất dấu vết khi deep-check thất bại (vd file
+                                // vừa bị xoá/mất quyền); không fail cả sync, chỉ giữ mimeType gốc.
+                                Log::channel($this->log_channel)->warning("GDrive Sync: deep mimeType check failed", [
+                                    'run_id' => $this->runId,
+                                    'file_id' => $fileId,
+                                    'error' => $e->getMessage(),
+                                ]);
+                            }
                         }
 
                         if ($exportSpec) {
@@ -644,6 +716,7 @@ class GDriveMirrorSync extends Command
                         } else {
                             $stats['errors']++;
                             $reason = $this->lastError ?? 'Unknown Error';
+                            $classified = self::classifyDriveError($reason);
                             $stats['failed_files'][] = [
                                 // 'path' matches listFolderRecursiveViaApi shape, so this entry
                                 // can be fed straight back through the main loop via --retry-failed.
@@ -656,6 +729,11 @@ class GDriveMirrorSync extends Command
                                 'size' => $remoteSize,
                                 'attempts' => $this->lastAttempts,
                                 'reason' => $reason,
+                                // permanent=true → item cũ (không có field này) coi như retryable
+                                // khi đọc lại report cũ (backward-compat, xem loadRetryFailedItems()).
+                                'permanent' => ! $classified['retryable'],
+                                'error_reason' => $classified['reason'],
+                                'category' => $classified['category'],
                             ];
                             $this->error("\n   ❌ Failed to sync: {$relativePath} | Attempts: {$this->lastAttempts} | Reason: {$reason}");
                         }
@@ -668,7 +746,7 @@ class GDriveMirrorSync extends Command
                 // Cleanup Logic removed for safety
             }
 
-            $this->finalReport($stats, $baseLocalPath, $targetIdentifiers);
+            $this->finalReport($stats, $baseLocalPath, $targetIdentifiers, $startedAt);
 
         } catch (\Throwable $th) {
             $this->error("\n💥 Fatal Error: " . $th->getMessage());
@@ -699,24 +777,154 @@ class GDriveMirrorSync extends Command
                 $msg = $e->getMessage();
                 $this->lastError = $msg;
 
-                // Specific check for Google Export Limit
-                if (str_contains($msg, 'exportSizeLimitExceeded')) {
-                    $this->warn("\n      ⚠️  Google Export Limit Exceeded (File too large). Skipping.");
-                    Log::channel($this->log_channel)->error("GDrive Sync: File too large to export", ['path' => $path]);
+                $classified = self::classifyDriveError($msg);
+
+                // Lỗi permanent (403 vĩnh viễn: exportSizeLimitExceeded, cannotExportFile,
+                // insufficientFilePermissions…) sẽ KHÔNG BAO GIỜ tự khỏi dù retry bao nhiêu lần
+                // — retry chỉ tốn backoff (2+4+8=14s...) vô ích cho mỗi file. Dừng ngay lần đầu.
+                if (! $classified['retryable']) {
+                    $this->warn("\n      ⚠️  Permanent error ({$classified['category']}). Skipping, no retry.");
+                    Log::channel($this->log_channel)->warning("GDrive Sync: permanent error, not retrying", [
+                        'run_id' => $this->runId,
+                        'path' => $path,
+                        'category' => $classified['category'],
+                        'reason' => $classified['reason'],
+                        'error' => $msg,
+                    ]);
                     return false;
                 }
 
                 if ($attempts > $maxRetries) {
-                    Log::channel($this->log_channel)->error("GDrive Sync: Final failure after {$maxRetries} retries", ['path' => $path, 'error' => $msg]);
+                    Log::channel($this->log_channel)->error("GDrive Sync: Final failure after {$maxRetries} retries", [
+                        'run_id' => $this->runId,
+                        'path' => $path,
+                        'category' => $classified['category'],
+                        'error' => $msg,
+                    ]);
                     return false;
                 }
 
                 $delay = min(2 ** $attempts, 30); // Exponential backoff: 2s, 4s, 8s… max 30s
                 $this->comment("      ⏳ Attempt {$attempts} failed, retrying in {$delay}s...");
+                // Log mỗi lần retry thất bại — trước đây chỉ có console comment() nên chạy qua
+                // cron là mất sạch, không biết command có đang phải retry nhiều hay không.
+                Log::channel($this->log_channel)->warning("GDrive Sync: retry attempt failed", [
+                    'run_id' => $this->runId,
+                    'path' => $path,
+                    'attempt' => $attempts,
+                    'max_retries' => $maxRetries,
+                    'delay_sec' => $delay,
+                    'error' => $msg,
+                ]);
                 sleep($delay);
             }
         }
         return false;
+    }
+
+    /**
+     * Phân loại lỗi Drive API theo `reason` field trong body JSON (KHÔNG string-match message
+     * chung chung — vd message "cannotExportFile" từng bị dán nhãn nhầm 'Permission denied' chỉ
+     * vì string chứa "403"). Pure/static để unit-test không cần boot Laravel.
+     *
+     * Google trả lỗi dạng:
+     *   {"error":{"code":403,"message":"...","errors":[{"reason":"cannotExportFile",...}]}}
+     *
+     * 🔴 NGUYÊN TẮC: permanent = ALLOWLIST reason đã biết chắc; MỌI thứ còn lại retryable=true.
+     * Lý do — hai chiều sai KHÔNG cân xứng:
+     *   • Đoán nhầm "permanent" → file bị bỏ hẳn, âm thầm mất khỏi mirror (nặng).
+     *   • Đoán nhầm "retryable" → phí ~14s backoff rồi cũng fail (nhẹ).
+     * → Khi không chắc, LUÔN nghiêng về retryable. Đừng suy "403 ⇒ permanent": Drive dùng 403
+     *   cho cả rate-limit tạm thời (dailyLimitExceeded, sharingRateLimitExceeded…).
+     *   Thêm reason mới vào $permanentReasons chỉ khi đã xác nhận nó KHÔNG BAO GIỜ tự khỏi.
+     *
+     * @return array{category: string, retryable: bool, reason: ?string}
+     */
+    public static function classifyDriveError(string $msg): array
+    {
+        $decoded = json_decode($msg, true);
+        $reason = null;
+        $code = null;
+
+        if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+            $reason = $decoded['error']['errors'][0]['reason'] ?? null;
+            $code = $decoded['error']['code'] ?? null;
+        }
+
+        // Permanent (403 vĩnh viễn) — retry sẽ KHÔNG BAO GIỜ thành công, chỉ tốn thời gian.
+        $permanentReasons = [
+            'exportSizeLimitExceeded' => 'Export size limit',
+            'cannotExportFile' => 'Not exportable (locked/unsupported)',
+            'fileNotExportable' => 'Not exportable (locked/unsupported)',
+            'notFound' => 'Not found',
+            'insufficientFilePermissions' => 'Permission denied',
+            'appNotAuthorizedToFile' => 'Permission denied',
+            'domainPolicy' => 'Permission denied',
+            'forbidden' => 'Permission denied',
+        ];
+        if ($reason !== null && isset($permanentReasons[$reason])) {
+            return ['category' => $permanentReasons[$reason], 'retryable' => false, 'reason' => $reason];
+        }
+
+        // Transient (tạm thời) — retry có cơ hội thành công. LƯU Ý: Drive trả rate-limit dưới
+        // CẢ 429 lẫn 403, nên không được suy ra "403 = permanent" (xem fallback bên dưới).
+        $transientReasons = [
+            'rateLimitExceeded' => 'Quota / rate limit',
+            'userRateLimitExceeded' => 'Quota / rate limit',
+            'sharingRateLimitExceeded' => 'Quota / rate limit',
+            'dailyLimitExceeded' => 'Quota / rate limit',
+            'quotaExceeded' => 'Quota / rate limit',
+            'backendError' => 'Server error (5xx)',
+            'internalError' => 'Server error (5xx)',
+        ];
+        if ($reason !== null && isset($transientReasons[$reason])) {
+            return ['category' => $transientReasons[$reason], 'retryable' => true, 'reason' => $reason];
+        }
+
+        if (in_array($code, [500, 502, 503, 504], true)) {
+            return ['category' => 'Server error (5xx)', 'retryable' => true, 'reason' => $reason];
+        }
+        if ($code === 403) {
+            // 403 với reason KHÔNG nằm trong allowlist permanent ở trên (hoặc không đọc được
+            // reason) → KHÔNG đủ chắc để coi là permanent. Drive dùng 403 cho cả rate-limit
+            // (dailyLimitExceeded, sharingRateLimitExceeded…) lẫn lỗi quyền thật, và Google có
+            // thể thêm reason mới bất cứ lúc nào. Mặc định retryable=true (xem ghi chú cân
+            // nhắc hai chiều sai ở cuối hàm).
+            return ['category' => 'Permission denied', 'retryable' => true, 'reason' => $reason];
+        }
+
+        // Không phải JSON hợp lệ (lỗi network/curl/Guzzle raw string) → fallback heuristic
+        // string-match như logic cũ.
+        $m = strtolower($msg);
+        if (str_contains($m, 'exportsizelimitexceeded') || str_contains($m, 'too large to export')) {
+            return ['category' => 'Export size limit', 'retryable' => false, 'reason' => 'exportSizeLimitExceeded'];
+        }
+        if (str_contains($m, 'cannotexportfile') || str_contains($m, 'not exportable')) {
+            return ['category' => 'Not exportable (locked/unsupported)', 'retryable' => false, 'reason' => 'cannotExportFile'];
+        }
+        if (str_contains($m, '404') || str_contains($m, 'not found') || str_contains($m, 'notfound')) {
+            return ['category' => 'Not found', 'retryable' => false, 'reason' => 'notFound'];
+        }
+        // Rate/quota PHẢI kiểm TRƯỚC 403: Drive trả rate-limit dưới cả 429 lẫn 403, nếu để
+        // nhánh 403 chặn trên thì rate-limit (tạm thời) bị nuốt thành 'Permission denied'.
+        if (str_contains($m, '429') || str_contains($m, 'rate') || str_contains($m, 'quota') || str_contains($m, 'userratelimit')) {
+            return ['category' => 'Quota / rate limit', 'retryable' => true, 'reason' => null];
+        }
+        if (str_contains($m, '403') || str_contains($m, 'forbidden') || str_contains($m, 'permission') || str_contains($m, 'insufficient')) {
+            // retryable=true: chuỗi 403 trần (không parse được reason) KHÔNG chứng minh được là
+            // permanent. Chỉ reason permanent đã biết ở allowlist trên mới được phép skip hẳn.
+            return ['category' => 'Permission denied', 'retryable' => true, 'reason' => null];
+        }
+        if (str_contains($m, 'timeout') || str_contains($m, 'timed out') || str_contains($m, 'curl error') || str_contains($m, 'connection')) {
+            return ['category' => 'Network / timeout', 'retryable' => true, 'reason' => null];
+        }
+        if (str_contains($m, '500') || str_contains($m, '502') || str_contains($m, '503') || str_contains($m, 'internal error') || str_contains($m, 'backenderror')) {
+            return ['category' => 'Server error (5xx)', 'retryable' => true, 'reason' => null];
+        }
+
+        // Lỗi lạ/không rõ → mặc định retryable=true để không mất lỗi mạng thật (an toàn hơn
+        // là âm thầm bỏ file, vì đại đa số lỗi lạ trong thực tế là hiccup mạng/API tạm thời).
+        return ['category' => 'Other', 'retryable' => true, 'reason' => null];
     }
 
     /**
@@ -848,8 +1056,19 @@ class GDriveMirrorSync extends Command
      * Display final report
      */
 
-    protected function finalReport($stats, $baseLocalPath, array $targetIdentifiers = [])
+    protected function finalReport($stats, $baseLocalPath, array $targetIdentifiers = [], float $startedAt = 0.0)
     {
+        $permanentCount = 0;
+        $retryableCount = 0;
+        foreach ($stats['failed_files'] as $f) {
+            if (! empty($f['permanent'])) {
+                $permanentCount++;
+            } else {
+                $retryableCount++;
+            }
+        }
+        $durationSec = $startedAt > 0 ? round(microtime(true) - $startedAt, 2) : null;
+
         $this->info("\n" . str_repeat("=", 50));
         $this->info("✨ MIRROR SYNC COMPLETED");
         $this->info(str_repeat("=", 50));
@@ -857,22 +1076,26 @@ class GDriveMirrorSync extends Command
         $this->comment("✅ Files Updated:    {$stats['updated']}");
         $this->comment("⏭️ Files Skipped:    {$stats['skipped']}");
         $this->comment("⚠️ Collisions:       {$stats['collisions']}");
-        $this->comment("❌ Errors encountered: {$stats['errors']}");
+        $this->comment("❌ Errors encountered: {$stats['errors']} (permanent: {$permanentCount}, retryable: {$retryableCount})");
 
         // Log Summary
         Log::channel($this->log_channel)->info("GDrive Mirror Sync COMPLETED", [
+            'run_id' => $this->runId,
             'folders' => $stats['folders'],
             'updated' => $stats['updated'],
             'skipped' => $stats['skipped'],
             'errors'  => $stats['errors'],
-            'path'    => $baseLocalPath
+            'collisions' => $stats['collisions'],
+            'permanent_count' => $permanentCount,
+            'path'    => $baseLocalPath,
+            'duration_sec' => $durationSec,
         ]);
 
         if (!empty($stats['failed_files'])) {
             // Group failed files by error category for quick triage.
             $grouped = [];
             foreach ($stats['failed_files'] as $f) {
-                $cat = $this->categorizeError($f['reason'] ?? '');
+                $cat = $f['category'] ?? $this->categorizeError($f['reason'] ?? '');
                 $grouped[$cat][] = $f;
             }
 
@@ -910,32 +1133,12 @@ class GDriveMirrorSync extends Command
 
     /**
      * Categorize a Drive API error message into a coarse bucket for grouping.
-     * Buckets: "Permission", "Not Found", "Export Limit", "Network/Timeout",
-     * "Quota/Rate Limit", "Server Error", "Other".
+     * Thin wrapper kept for backward-compat (may still be called elsewhere) — the real
+     * classification logic (JSON reason-based, retryable/permanent) lives in classifyDriveError().
      */
     protected function categorizeError(string $msg): string
     {
-        $m = strtolower($msg);
-
-        if (str_contains($m, 'exportsizelimitexceeded') || str_contains($m, 'too large to export')) {
-            return 'Export size limit';
-        }
-        if (str_contains($m, '403') || str_contains($m, 'forbidden') || str_contains($m, 'permission') || str_contains($m, 'insufficient')) {
-            return 'Permission denied';
-        }
-        if (str_contains($m, '404') || str_contains($m, 'not found') || str_contains($m, 'notfound')) {
-            return 'Not found';
-        }
-        if (str_contains($m, '429') || str_contains($m, 'rate') || str_contains($m, 'quota') || str_contains($m, 'userratelimit')) {
-            return 'Quota / rate limit';
-        }
-        if (str_contains($m, 'timeout') || str_contains($m, 'timed out') || str_contains($m, 'curl error') || str_contains($m, 'connection')) {
-            return 'Network / timeout';
-        }
-        if (str_contains($m, '500') || str_contains($m, '502') || str_contains($m, '503') || str_contains($m, 'internal error') || str_contains($m, 'backenderror')) {
-            return 'Server error (5xx)';
-        }
-        return 'Other';
+        return self::classifyDriveError($msg)['category'];
     }
 
     /**
@@ -958,11 +1161,21 @@ class GDriveMirrorSync extends Command
         $fileName = sprintf('failed-%s-%s.json', $folderTag, date('Ymd-His'));
         $absolutePath = $reportDir . DIRECTORY_SEPARATOR . $fileName;
 
+        $permanentCount = 0;
+        foreach ($failedFiles as $f) {
+            if (! empty($f['permanent'])) {
+                $permanentCount++;
+            }
+        }
+
         $payload = [
             'generated_at' => date('c'),
+            'run_id' => $this->runId,
             'folder_ids' => array_values($targetIdentifiers),
             'base_local_path' => $baseLocalPath,
             'count' => count($failedFiles),
+            'permanent_count' => $permanentCount,
+            'retryable_count' => count($failedFiles) - $permanentCount,
             'items' => $failedFiles,
         ];
 
@@ -972,7 +1185,31 @@ class GDriveMirrorSync extends Command
             return null;
         }
 
+        $this->pruneOldFailedReports($reportDir);
+
         return $absolutePath;
+    }
+
+    /**
+     * Giữ tối đa MAX_FAILED_REPORTS report mới nhất trong thư mục failed/, xoá phần còn lại.
+     * Trước đây tích luỹ vô hạn (đã thấy 3 file trùng byte-for-byte trong thực tế). Lỗi xoá
+     * chỉ warn, không được làm fail cả command — report vừa ghi xong vẫn dùng được bình thường.
+     */
+    protected function pruneOldFailedReports(string $reportDir): void
+    {
+        $files = glob($reportDir . DIRECTORY_SEPARATOR . 'failed-*.json') ?: [];
+        if (count($files) <= self::MAX_FAILED_REPORTS) {
+            return;
+        }
+
+        usort($files, fn ($a, $b) => filemtime($b) <=> filemtime($a));
+        $toDelete = array_slice($files, self::MAX_FAILED_REPORTS);
+
+        foreach ($toDelete as $file) {
+            if (! @unlink($file)) {
+                $this->warn("⚠️  Could not prune old report: {$file}");
+            }
+        }
     }
 
     /**

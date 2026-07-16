@@ -3,6 +3,35 @@
 ## [Unreleased]
 
 ### Fixed
+- **[GDriveMirrorSync][🔴 retry vô ích cho lỗi 403 vĩnh viễn] Phân loại lỗi Drive theo `reason` JSON, không string-match message.**
+  Phân tích 74 entry lỗi thật (6 report `storage/app/gdrive-sync/failed/*.json`): 100% là 403 vĩnh viễn
+  (`exportSizeLimitExceeded` 50×, `cannotExportFile` 24×) — 0 lỗi transient. `cannotExportFile` (file bị
+  Google lock) từng bị dán nhãn nhầm "Permission denied" vì message chứa chuỗi "403" (string-match cũ),
+  và bị **retry 3 lần vô ích** (backoff 2+4+8=14s/file) dù lỗi này KHÔNG BAO GIỜ tự khỏi. Fix: thêm
+  `GDriveMirrorSync::classifyDriveError()` (pure/static) đọc `error.errors[0].reason` từ body JSON thật
+  của Google trước, fallback heuristic string-match cho lỗi non-JSON (network/curl). `withRetry()` dừng
+  ngay lập tức (không sleep) khi lỗi permanent; log mỗi lần retry thất bại (trước đây chỉ có console
+  `comment()` — chạy qua cron là mất sạch). `categorizeError()` cũ giữ nguyên làm wrapper mỏng.
+  Test hồi quy: `tests/Unit/GDriveErrorClassificationTest.php`.
+- **[GDriveMirrorSync][🔴 rate-limit 403 bị nuốt thành permanent → mất file im lặng] Nguyên tắc allowlist cho `classifyDriveError()`.**
+  Drive trả rate-limit dưới **cả 429 lẫn 403** (`dailyLimitExceeded`, `sharingRateLimitExceeded`). Chuỗi
+  fallback ban đầu match `403` TRƯỚC `rate`/`quota` và trả `retryable=false` → lỗi TẠM THỜI bị coi là vĩnh
+  viễn → file bị bỏ hẳn, âm thầm mất khỏi mirror. Ở code cũ thứ tự này vô hại (`categorizeError()` chỉ dùng
+  để hiển thị), nhưng khi nó trở thành thứ QUYẾT ĐỊNH retry thì lỗi cosmetic thành lỗi mất dữ liệu.
+  Fix: (1) bổ sung `dailyLimitExceeded`/`sharingRateLimitExceeded` vào transient; (2) kiểm rate/quota trước
+  403; (3) **permanent = allowlist reason đã biết chắc, mọi thứ còn lại retryable=true** — vì hai chiều sai
+  không cân xứng: đoán nhầm permanent = mất file vĩnh viễn, đoán nhầm retryable = phí ~14s backoff.
+- **[GDriveMirrorSync][report tích luỹ vô hạn] Rotate `storage/app/gdrive-sync/failed/` — giữ 10 report mới nhất.**
+  Đã thấy 6 report tích luỹ, trong đó 3 file (folder `66c5cc45`) + 2 file (folder `cb9bd785`) trùng nội
+  dung hoàn toàn: cùng bộ file fail y hệt, mỗi lần chạy lại đẻ thêm 1 report mới, không ai dọn.
+  Fix: `pruneOldFailedReports()` sau mỗi lần ghi report, giữ `MAX_FAILED_REPORTS = 10`.
+- **[GDriveMirrorSync][docblock sai đường dẫn log] Sửa `storage/logs/laravel-YYYY-MM-DD.log` → `storage/logs/pull.vn-YYYY-MM-DD.log`** (channel `daily` của pull-server trỏ `pull.vn.log`, không phải mặc định Laravel).
+- **[GDriveMirrorSync][skip im lặng mất dấu vết] Log warning cho các nhánh trước đây chỉ `$this->warn()`/`continue` im lặng**: service-account mode gặp path (không phải Folder ID), "Found 0 items", và empty catch của deep-check mimeType. Chạy qua cron trước đây các trường hợp này biến mất hoàn toàn khỏi log.
+
+### Added
+- **[GDriveMirrorSync] `--include-permanent`**: mặc định `--retry-failed` CHỈ nạp item retryable (bỏ qua item `permanent`); cờ này nạp cả 2 loại. Report JSON mỗi item thêm `permanent`/`error_reason`/`category`; payload top-level thêm `permanent_count`/`retryable_count`.
+- **[GDriveMirrorSync] `run_id`** (uniqid ngắn) gắn vào mọi log entry của 1 lần chạy (START/END/warning/error) — truy vết được 1 run cụ thể khi chạy qua cron. Summary log (END) thêm `collisions`, `permanent_count`, `duration_sec`.
+
 - **[Google Sheets][🔴🔴 CRITICAL — mất lead IM LẶNG do collision] `apps_google_sheet()` revert từ `values.update A{count(A:A)+1}` về `append(INSERT_ROWS)`.**
   Bản `values.update` tự đọc cột A rồi ghi `A{count+1}`: khi nhiều lead ghi dồn (queue burst) + Google
   **read-after-write lag**, mọi lead đọc `count(A:A)` bị stale (=1, chỉ thấy header) => cùng tính targetRow=2
