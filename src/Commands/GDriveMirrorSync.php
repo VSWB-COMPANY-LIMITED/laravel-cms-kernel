@@ -183,6 +183,16 @@
  *                 Google giới hạn cứng 10MB; file cannotExportFile/fileNotExportable (chủ khoá)
  *                 thì không tải được bằng cách nào, kể cả thủ công. Nếu run sau folder không còn
  *                 permanent-fail (đã vá) → manifest cũ tự bị XOÁ.
+ *       • Spreadsheet: storage/app/gdrive-sync/<dmY_His>.xlsx (vd 17072026_231609.xlsx) nếu
+ *                 project có OpenSpout/PhpSpreadsheet, ngược lại .csv (dấu `;` + BOM UTF-8 —
+ *                 Excel-safe cho locale VN trên macOS). TỰ ĐỘNG xuất mỗi lần chạy có file lỗi,
+ *                 KHÔNG cần cờ bật/tắt. Cột: file, path, local_path, folder_root_id, loai,
+ *                 google_native, mime_type, size_bytes, size, category, error_reason, permanent,
+ *                 attempts, error_message, drive_id, drive_link, run_id, report_time, trung_file,
+ *                 dong_dai_dien (2 cột cuối đánh dấu file trùng khi cùng 1 file Drive lặp qua
+ *                 nhiều folder gốc lồng nhau — lọc dong_dai_dien=yes để có danh sách file riêng
+ *                 biệt). Giữ 10 bản mới nhất (cùng ngưỡng với report JSON ở trên, tự xoá bản cũ
+ *                 hơn), lưu ở ROOT thư mục gdrive-sync/ (không phải failed/).
  *
  *  ── RETRY WORKFLOW
  *     php artisan gdrive:mirror:sync \
@@ -1686,6 +1696,17 @@ class GDriveMirrorSync extends Command
                 $this->info("   → Retry with: php artisan gdrive:mirror:sync --retry-failed=\"{$reportPath}\" --path=\"{$baseLocalPath}\"");
             }
 
+            // Spreadsheet TỰ ĐỘNG (mặc định BẬT, không cần cờ) — dễ mở/lọc bằng Excel hơn JSON.
+            $spreadsheetPath = $this->writeFailedSpreadsheet($stats['failed_files'], $baseLocalPath, $targetIdentifiers);
+            if ($spreadsheetPath) {
+                $this->info("📊 Bảng file lỗi: {$spreadsheetPath}");
+                Log::channel($this->log_channel)->info("GDrive Sync: đã ghi bảng file lỗi", [
+                    'run_id' => $this->runId,
+                    'path' => $spreadsheetPath,
+                    'row_count' => count($stats['failed_files']),
+                ]);
+            }
+
             // Log full error list for persistence
             Log::channel($this->log_channel)->error("GDrive Sync: List of failed files", [
                 'failed_files' => $stats['failed_files'],
@@ -1779,6 +1800,249 @@ class GDriveMirrorSync extends Command
         foreach ($toDelete as $file) {
             if (! @unlink($file)) {
                 $this->warn("⚠️  Could not prune old report: {$file}");
+            }
+        }
+    }
+
+    /**
+     * Build danh sách dòng cho spreadsheet file lỗi của MỘT RUN hiện tại ($stats['failed_files']).
+     * KHÁC 2 script standalone tham khảo (export-failed-csv.php / export-failed-xlsx.php) vốn quét
+     * TOÀN BỘ thư mục failed/*.json của nhiều lần chạy — ở đây chỉ có DUY NHẤT report của run vừa
+     * xong, nên không cần bước gom "report mới nhất mỗi folder".
+     *
+     * Pure/static (không đụng $this/facade) để unit test không cần boot Laravel — cùng pattern
+     * buildUnexportableManifest()/classifyDriveError().
+     *
+     * Thứ tự cột CỐ ĐỊNH (không phải thứ tự PHP tự nhiên) để spreadsheet ổn định giữa các lần
+     * chạy: file, path, local_path, folder_root_id, loai, google_native, mime_type, size_bytes,
+     * size, category, error_reason, permanent, attempts, error_message, drive_id, drive_link,
+     * run_id, report_time, trung_file, dong_dai_dien.
+     *
+     * @param array<int, array<string, mixed>> $failedFiles $stats['failed_files'] của run hiện tại
+     * @param array{base_local_path: string, folder_ids: array, run_id: string, generated_at: string} $meta
+     * @return array<int, array<string, string>> LIST theo đúng thứ tự cột trên, đã sort
+     *         permanent trước → category → size_bytes giảm dần.
+     */
+    public static function buildFailedRows(array $failedFiles, array $meta): array
+    {
+        if (empty($failedFiles)) {
+            return [];
+        }
+
+        $base = rtrim((string) ($meta['base_local_path'] ?? ''), '/');
+        $folders = implode(',', (array) ($meta['folder_ids'] ?? []));
+        $runId = (string) ($meta['run_id'] ?? '');
+        $reportTime = (string) ($meta['generated_at'] ?? '');
+
+        $rows = [];
+        foreach ($failedFiles as $item) {
+            $path = (string) ($item['path'] ?? '');
+            $mime = $item['mimeType'] ?? null;
+            $isNative = $mime && str_starts_with((string) $mime, 'application/vnd.google-apps.');
+            $id = (string) ($item['id'] ?? '');
+
+            $rows[] = [
+                'file' => $path === '' ? '' : basename($path),
+                'path' => $path,
+                'local_path' => $base !== '' && $path !== '' ? $base . '/' . $path : '',
+                'folder_root_id' => $folders,
+                'loai' => (string) ($item['type'] ?? ''),
+                'google_native' => $isNative ? 'yes' : 'no',
+                'mime_type' => (string) ($mime ?? ''),
+                'size_bytes' => (string) ($item['size'] ?? 0),
+                'size' => self::humanSize((int) ($item['size'] ?? 0)),
+                'category' => (string) ($item['category'] ?? ''),
+                'error_reason' => (string) ($item['error_reason'] ?? ''),
+                'permanent' => ! empty($item['permanent']) ? 'yes' : 'no',
+                'attempts' => (string) ($item['attempts'] ?? ''),
+                // buildManualDownloadUrl() đã có sẵn cùng mapping mime→URL của script gốc
+                // (docs.google.com/{type}/d cho Google Native, drive.google.com/file/d cho file
+                // thường) — tái dùng thay vì viết lại driveLink() riêng.
+                'error_message' => self::extractErrorMessage($item['reason'] ?? ''),
+                'drive_id' => $id,
+                'drive_link' => $id !== '' ? self::buildManualDownloadUrl($id, (string) ($mime ?? ''), $path)[0] : '',
+                'run_id' => $runId,
+                'report_time' => $reportTime,
+            ];
+        }
+
+        // Cùng 1 file Drive có thể lặp qua nhiều folder gốc lồng nhau trong 1 run → đánh dấu để
+        // lọc được cả hai cách thay vì tự ý bỏ dòng (bỏ = mất thông tin job nào đang thiếu file
+        // đó — xem giải thích gốc trong export-failed-csv.php).
+        $idCount = [];
+        foreach ($rows as $r) {
+            if ($r['drive_id'] !== '') {
+                $idCount[$r['drive_id']] = ($idCount[$r['drive_id']] ?? 0) + 1;
+            }
+        }
+        $seen = [];
+        foreach ($rows as &$r) {
+            $id = $r['drive_id'];
+            $isDup = $id !== '' && ($idCount[$id] ?? 0) > 1;
+            $r['trung_file'] = $isDup ? 'yes' : 'no';
+            // Đúng 1 dòng/file được đánh 'yes' → lọc cột này = danh sách file RIÊNG BIỆT.
+            $r['dong_dai_dien'] = (! $isDup || ! isset($seen[$id])) ? 'yes' : 'no';
+            $seen[$id] = true;
+        }
+        unset($r);
+
+        // Sắp: permanent trước (cần hành động thủ công), rồi theo category, rồi size giảm dần.
+        usort($rows, static function (array $a, array $b) {
+            return [$b['permanent'], $a['category'], (int) $b['size_bytes']]
+                <=> [$a['permanent'], $b['category'], (int) $a['size_bytes']];
+        });
+
+        return $rows;
+    }
+
+    /**
+     * Rút message người-đọc-được từ 'reason' (chuỗi JSON lỗi Google, hoặc raw string lỗi mạng/
+     * filesystem). Tách riêng khỏi error_reason (machine key từ classifyDriveError()) — cột này
+     * dành cho message hiển thị cho người dùng cuối đọc trong spreadsheet.
+     */
+    private static function extractErrorMessage($reason): string
+    {
+        if (! is_string($reason) || $reason === '') {
+            return '';
+        }
+        $decoded = json_decode($reason, true);
+        if (json_last_error() === JSON_ERROR_NONE && isset($decoded['error']['message'])) {
+            return (string) $decoded['error']['message'];
+        }
+
+        // Không phải JSON (lỗi mạng/filesystem dạng chuỗi trần) → rút gọn 1 dòng.
+        return trim(preg_replace('/\s+/', ' ', $reason));
+    }
+
+    /**
+     * Render rows (từ buildFailedRows()) thành chuỗi CSV Excel-safe cho locale VN: BOM UTF-8 +
+     * dấu phân cách `;`. Tách khỏi writeFailedSpreadsheet() (không đụng storage_path()/facade) để
+     * unit test được mà không cần boot Laravel — xem GDriveFailedRowsTest.
+     *
+     * Vì sao `;` thay vì `,`: Excel trên macOS locale Việt Nam coi `,` là dấu thập phân, nên CSV
+     * chuẩn dùng `,` bị Excel dồn hết vào 1 cột khi mở — đây là nguyên nhân chính user gặp phải.
+     * BOM UTF-8 để Excel đọc đúng charset (không có BOM, Excel tự đoán theo locale hệ điều hành →
+     * tiếng Việt trong path/tên file thành ký tự rác).
+     *
+     * @param array<int, array<string, string>> $rows từ buildFailedRows()
+     */
+    public static function renderFailedCsv(array $rows): string
+    {
+        if (empty($rows)) {
+            return '';
+        }
+
+        $fh = fopen('php://temp', 'r+');
+        fwrite($fh, "\xEF\xBB\xBF");
+        // escape='' — PHP 8.4 deprecate giá trị mặc định; escape kiểu backslash của PHP vốn KHÔNG
+        // chuẩn CSV và làm hỏng path chứa dấu \. Ép rỗng = quote-only đúng RFC 4180.
+        fputcsv($fh, array_keys($rows[0]), ';', '"', '');
+        foreach ($rows as $row) {
+            fputcsv($fh, array_values($row), ';', '"', '');
+        }
+        rewind($fh);
+        $csv = stream_get_contents($fh);
+        fclose($fh);
+
+        return (string) $csv;
+    }
+
+    /**
+     * Ghi spreadsheet danh sách file lỗi của run hiện tại — TỰ ĐỘNG mỗi lần chạy có failed_files,
+     * KHÔNG cần cờ bật/tắt. Tên file `date('dmY_His')` (vd 17072026_231609), đặt tại ROOT của
+     * storage/app/gdrive-sync/ (không phải failed/ — chỗ đó dành cho JSON report retry).
+     *
+     * Chọn writer theo lib có sẵn — kernel package KHÔNG hard-depend OpenSpout/PhpSpreadsheet (chỉ
+     * pull-server require), nên PHẢI guard bằng class_exists() để fresh install thiếu lib không bị
+     * fatal:
+     *   - Có OpenSpout (\OpenSpout\Writer\XLSX\Writer) → ghi .xlsx.
+     *   - Không có → ghi .csv qua renderFailedCsv() (`;` + BOM UTF-8, Excel-safe cho locale VN).
+     *
+     * KHÔNG throw ra ngoài: 1 lỗi ghi spreadsheet không được giết finalReport() — bọc try/catch,
+     * chỉ warn + log, giống các method ghi file khác (writeFailedReport/writeUnexportableManifest).
+     *
+     * @return string|null path đã ghi, hoặc null nếu không có gì để ghi / ghi lỗi.
+     */
+    protected function writeFailedSpreadsheet(array $failedFiles, string $baseLocalPath, array $targetIdentifiers): ?string
+    {
+        if (empty($failedFiles)) {
+            return null;
+        }
+
+        $rows = self::buildFailedRows($failedFiles, [
+            'base_local_path' => $baseLocalPath,
+            'folder_ids' => array_values($targetIdentifiers),
+            'run_id' => $this->runId,
+            'generated_at' => date('c'),
+        ]);
+        if (empty($rows)) {
+            return null;
+        }
+
+        $dir = storage_path('app/gdrive-sync');
+        if (! is_dir($dir) && ! @mkdir($dir, 0755, true) && ! is_dir($dir)) {
+            $this->warn("⚠️  Could not create failed-spreadsheet dir: {$dir}");
+            return null;
+        }
+
+        $useXlsx = class_exists(\OpenSpout\Writer\XLSX\Writer::class);
+        $path = $dir . DIRECTORY_SEPARATOR . date('dmY_His') . ($useXlsx ? '.xlsx' : '.csv');
+
+        try {
+            if ($useXlsx) {
+                $writer = new \OpenSpout\Writer\XLSX\Writer();
+                $writer->openToFile($path);
+                $writer->addRow(\OpenSpout\Common\Entity\Row::fromValues(
+                    array_keys($rows[0]),
+                    (new \OpenSpout\Common\Entity\Style\Style())->setFontBold()
+                ));
+                foreach ($rows as $row) {
+                    $writer->addRow(\OpenSpout\Common\Entity\Row::fromValues(array_values($row)));
+                }
+                $writer->close();
+            } elseif (@file_put_contents($path, self::renderFailedCsv($rows)) === false) {
+                $this->warn("⚠️  Could not write failed spreadsheet: {$path}");
+                return null;
+            }
+        } catch (\Throwable $e) {
+            $this->warn("⚠️  Could not write failed spreadsheet ({$path}): {$e->getMessage()}");
+            Log::channel($this->log_channel)->warning('GDrive Sync: failed to write failed-files spreadsheet', [
+                'run_id' => $this->runId,
+                'path' => $path,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+
+        $this->pruneOldFailedSpreadsheets($dir);
+
+        return $path;
+    }
+
+    /**
+     * Giữ tối đa MAX_FAILED_REPORTS (tái dùng cùng ngưỡng với pruneOldFailedReports() — cùng lý
+     * do "chạy qua cron định kỳ, không prune sẽ tích luỹ vô hạn") bản spreadsheet mới nhất trong
+     * storage/app/gdrive-sync/ (root). Match tên file đúng định dạng `date('dmY_His')` để KHÔNG
+     * đụng tới các file/thư mục khác cùng cấp (failed/, unexportable/, state/). Lỗi xoá chỉ warn,
+     * không làm fail cả command.
+     */
+    protected function pruneOldFailedSpreadsheets(string $dir): void
+    {
+        $files = glob($dir . DIRECTORY_SEPARATOR . '*') ?: [];
+        $files = array_values(array_filter(
+            $files,
+            static fn ($f) => is_file($f) && preg_match('/^\d{8}_\d{6}\.(xlsx|csv)$/', basename($f)) === 1
+        ));
+        if (count($files) <= self::MAX_FAILED_REPORTS) {
+            return;
+        }
+
+        usort($files, fn ($a, $b) => filemtime($b) <=> filemtime($a));
+        $toDelete = array_slice($files, self::MAX_FAILED_REPORTS);
+
+        foreach ($toDelete as $file) {
+            if (! @unlink($file)) {
+                $this->warn("⚠️  Could not prune old failed spreadsheet: {$file}");
             }
         }
     }

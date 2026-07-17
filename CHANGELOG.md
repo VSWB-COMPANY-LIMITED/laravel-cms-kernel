@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+- **[GDriveMirrorSync] Spreadsheet danh sách file lỗi — TỰ ĐỘNG xuất mỗi lần chạy có `failed_files` (mặc định BẬT, không cần cờ).**
+  User dùng Excel trên macOS locale Việt Nam — JSON report cũ (`failed/failed-*.json`) không mở
+  trực tiếp bằng Excel được, phải tự viết script chuyển đổi mỗi lần cần soi lỗi.
+  Nay `finalReport()` tự gọi `writeFailedSpreadsheet()` ngay sau `writeFailedReport()`: ghi
+  `storage/app/gdrive-sync/<dmY_His>.xlsx` (vd `17072026_231609.xlsx`) nếu project có
+  OpenSpout/PhpSpreadsheet, ngược lại `.csv` với **BOM UTF-8 + dấu `;`** (Excel trên macOS locale
+  VN coi `,` là dấu thập phân → CSV chuẩn dùng `,` bị dồn hết vào 1 cột — đây là lý do chính user
+  gặp phải). Kernel package KHÔNG hard-depend OpenSpout/PhpSpreadsheet (chỉ pull-server có) nên
+  chọn writer qua `class_exists()` guard.
+  20 cột: `file, path, local_path, folder_root_id, loai, google_native, mime_type, size_bytes,
+  size, category, error_reason, permanent, attempts, error_message, drive_id, drive_link, run_id,
+  report_time, trung_file, dong_dai_dien` — sort permanent trước → category → size giảm dần;
+  `trung_file`/`dong_dai_dien` đánh dấu (không xoá dòng) khi cùng 1 file Drive lặp qua nhiều folder
+  gốc lồng nhau. Giữ 10 bản mới nhất (tái dùng ngưỡng `MAX_FAILED_REPORTS`), lưu ở root
+  `storage/app/gdrive-sync/` (không phải `failed/`).
+  Logic build dòng tách thành `buildFailedRows()` (pure/static) + `renderFailedCsv()` (pure/static)
+  để test không cần boot Laravel/OpenSpout. Test: `tests/Unit/GDriveFailedRowsTest.php` (11 test).
+  Nhánh `.xlsx` không test được trong kernel (thiếu lib) — verify live ở pull-server.
+
 ### Fixed
 - **[GDriveMirrorSync][🔴 file âm thầm thiếu khỏi mirror LẪN manifest] `cannotDownloadFile` vào allowlist permanent.**
   Phát hiện khi CHẠY THẬT để verify các fix bên dưới (run `9cd3158b` 2026-07-17): file dính 403
