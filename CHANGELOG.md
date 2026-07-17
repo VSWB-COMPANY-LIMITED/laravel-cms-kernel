@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### Fixed
+- **[GDriveMirrorSync][🔴 8 file âm thầm thiếu khỏi mirror] `cannotDownloadFile` vào allowlist permanent.**
+  Phát hiện khi CHẠY THẬT để verify các fix bên dưới (log `pull.vn-2026-07-17.log`, run `9cd3158b`
+  14:44-14:47): 8 file dính 403 `reason: cannotDownloadFile` ("This file cannot be downloaded by the
+  user" — chủ file TẮT quyền tải xuống cho người xem). Reason này KHÔNG có trong `$permanentReasons`
+  → rơi xuống nhánh 403-fallback → `retryable=true` → hai hậu quả: (1) mỗi file đốt 3 retry × backoff
+  (2+4+8=14s) rồi vẫn fail — retry KHÔNG BAO GIỜ khỏi vì chỉ chủ file đổi setting chia sẻ mới gỡ
+  được; (2) NẶNG HƠN — không được đánh `permanent` nên KHÔNG lọt vào manifest `unexportable/` (vốn
+  chỉ liệt kê item permanent) → 8 file thiếu khỏi mirror mà không ai nhìn thấy. Đây ĐÚNG class bug
+  với `cannotExportFile` đã vá 2026-07-16. Fix: thêm vào allowlist + ghi chú manifest nêu rõ cách gỡ
+  (xin chủ bật lại "Viewers can download") — khác `cannotExportFile` vốn vô phương cứu. Test hồi quy
+  dùng body JSON copy nguyên văn từ log.
 - **[GDriveMirrorSync][🔴🔴 1 lỗi đọc đĩa giết CẢ RUN] Guard I/O cho delta-check (`md5_file()`/`filesize()`/`File::lastModified()`).**
   Phát hiện từ log THẬT (`storage/logs/pull.vn-2026-07-17.log` trên pull-server, run `f0547f35`
   01:19:20): ổ đích exFAT ngoài (`/Volumes/WD-DATA1`) rớt kết nối giữa chừng khi `md5_file()` đang đọc

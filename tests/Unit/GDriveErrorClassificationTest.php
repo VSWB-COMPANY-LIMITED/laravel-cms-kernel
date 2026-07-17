@@ -64,6 +64,30 @@ class GDriveErrorClassificationTest extends TestCase
                 'Not exportable (locked/unsupported)',
                 false,
             ],
+            // Hồi quy cho bug PHÁT HIỆN LÚC CHẠY THẬT (2026-07-17, run 9cd3158b 14:44-14:45):
+            // 8 file dính reason này. Reason KHÔNG có trong allowlist permanent → rơi xuống
+            // nhánh 403-fallback → retryable=true → mỗi file đốt 14s backoff rồi vẫn fail, và
+            // vì không permanent nên KHÔNG lọt vào manifest unexportable → âm thầm thiếu khỏi
+            // mirror. Body copy NGUYÊN VĂN từ log thật.
+            'cannotDownloadFile (real log body — owner disabled download)' => [
+                <<<'JSON'
+                {
+                  "error": {
+                    "code": 403,
+                    "message": "This file cannot be downloaded by the user.",
+                    "errors": [
+                      {
+                        "message": "This file cannot be downloaded by the user.",
+                        "domain": "global",
+                        "reason": "cannotDownloadFile"
+                      }
+                    ]
+                  }
+                }
+                JSON,
+                'Not downloadable (chủ tắt quyền tải)',
+                false,
+            ],
             'notFound (404)' => [
                 <<<'JSON'
                 {

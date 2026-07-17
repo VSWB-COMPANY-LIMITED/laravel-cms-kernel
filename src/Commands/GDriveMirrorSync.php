@@ -302,7 +302,10 @@
  *  này LUÔN LÀ BẢN MỚI NHẤT của folder (ghi đè mỗi lần chạy, tự xoá khi hết lỗi) — mở lên là
  *  biết ngay hiện đang thiếu file nào, không cần đào JSON. File >10MB (exportSizeLimitExceeded)
  *  là giới hạn CỨNG của API files.export, chỉ tải được bằng tay qua trình duyệt (link kèm sẵn
- *  trong manifest); file bị chủ khoá (cannotExportFile) thì không cách nào tải được, kể cả tay.
+ *  trong manifest); file bị chủ khoá (cannotExportFile) thì không cách nào tải được, kể cả tay;
+ *  file chủ TẮT quyền tải xuống (cannotDownloadFile) gỡ được bằng cách xin chủ bật lại
+ *  "Viewers can download" trong setting chia sẻ — manifest ghi rõ để biết đây là việc đi xin
+ *  quyền chứ không phải file hỏng.
  *
  *  Nếu ổ đích không ghi được NGAY TỪ ĐẦU (unmount/read-only), preflight sẽ chặn và thoát
  *  Command::FAILURE trước khi list Drive (không tốn thời gian liệt kê). Nếu ổ hỏng GIỮA CHỪNG
@@ -1166,6 +1169,16 @@ class GDriveMirrorSync extends Command
             'domainPolicy' => 'Permission denied',
             'forbidden' => 'Permission denied',
             'fileNotDownloadable' => 'Not downloadable (Docs Editors/shortcut)',
+            // Bằng chứng THẬT (log pull.vn-2026-07-17, run 9cd3158b 14:44-14:45): 8 file dính
+            // 403 reason=cannotDownloadFile ("This file cannot be downloaded by the user") =
+            // CHỦ FILE TẮT quyền tải xuống cho viewer. Retry sau 2/4/8s KHÔNG BAO GIỜ khỏi —
+            // chỉ khỏi khi chủ đổi setting chia sẻ, việc mà command không tác động được. Trước
+            // đây reason này KHÔNG có trong allowlist → rơi xuống nhánh 403-fallback → gán
+            // retryable=true → mỗi file đốt 14s backoff rồi vẫn fail, VÀ (nặng hơn) không được
+            // đánh permanent nên KHÔNG lọt vào manifest unexportable → 8 file âm thầm thiếu
+            // khỏi mirror mà không ai thấy. Đánh permanent làm TỐT HƠN cả hai chiều: bỏ retry
+            // vô ích + hiện trong manifest để người đọc biết đang thiếu gì.
+            'cannotDownloadFile' => 'Not downloadable (chủ tắt quyền tải)',
         ];
         if ($reason !== null && isset($permanentReasons[$reason])) {
             return ['category' => $permanentReasons[$reason], 'retryable' => false, 'reason' => $reason];
@@ -1851,12 +1864,16 @@ class GDriveMirrorSync extends Command
             $groups[$key] = $groupItems;
         }
 
-        // Hướng dẫn xử lý riêng cho 2 reason đã biết chắc (khớp classifyDriveError permanentReasons).
+        // Hướng dẫn xử lý riêng cho các reason đã biết chắc (khớp classifyDriveError permanentReasons).
         // Reason khác → chỉ dùng category làm tiêu đề, KHÔNG có ghi chú hướng dẫn riêng.
         $reasonNotes = [
             'exportSizeLimitExceeded' => 'QUÁ LỚN để export qua API (giới hạn 10MB của `files.export`) — **tải tay qua trình duyệt được**.',
             'cannotExportFile' => 'Bị chủ file KHOÁ — không tải được bằng cách nào, kể cả thủ công.',
             'fileNotExportable' => 'Bị chủ file KHOÁ — không tải được bằng cách nào, kể cả thủ công.',
+            // Khác cannotExportFile ở CÁCH GỠ: file vẫn tải được BÌNH THƯỜNG nếu chủ bật lại
+            // "người xem được tải xuống" trong setting chia sẻ → đáng ghi rõ để người đọc biết
+            // đây là việc đi xin quyền, không phải file hỏng vô phương cứu.
+            'cannotDownloadFile' => 'Chủ file TẮT quyền tải xuống cho người xem — mirror KHÔNG lấy được. Gỡ bằng cách xin chủ file bật lại "Viewers can download" trong setting chia sẻ.',
         ];
 
         $lines = [];
