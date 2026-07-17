@@ -1169,15 +1169,18 @@ class GDriveMirrorSync extends Command
             'domainPolicy' => 'Permission denied',
             'forbidden' => 'Permission denied',
             'fileNotDownloadable' => 'Not downloadable (Docs Editors/shortcut)',
-            // Bằng chứng THẬT (log pull.vn-2026-07-17, run 9cd3158b 14:44-14:45): 8 file dính
+            // Bằng chứng THẬT (run 9cd3158b 2026-07-17, report failed-66c5cc45-20260717-150730.json):
+            // run fail 28 file = 23 permanent + 5 retryable, và 5 retryable đó ĐÚNG BẰNG 5 file
             // 403 reason=cannotDownloadFile ("This file cannot be downloaded by the user") =
             // CHỦ FILE TẮT quyền tải xuống cho viewer. Retry sau 2/4/8s KHÔNG BAO GIỜ khỏi —
             // chỉ khỏi khi chủ đổi setting chia sẻ, việc mà command không tác động được. Trước
             // đây reason này KHÔNG có trong allowlist → rơi xuống nhánh 403-fallback → gán
             // retryable=true → mỗi file đốt 14s backoff rồi vẫn fail, VÀ (nặng hơn) không được
-            // đánh permanent nên KHÔNG lọt vào manifest unexportable → 8 file âm thầm thiếu
-            // khỏi mirror mà không ai thấy. Đánh permanent làm TỐT HƠN cả hai chiều: bỏ retry
-            // vô ích + hiện trong manifest để người đọc biết đang thiếu gì.
+            // đánh permanent nên KHÔNG lọt vào manifest unexportable → âm thầm thiếu khỏi mirror
+            // mà không ai thấy. Đã đo tận nơi: manifest 66c5cc45.md liệt kê ĐÚNG 23 file (13+7+3),
+            // 5 file cannotDownloadFile KHÔNG xuất hiện dòng nào — tức chúng thiếu khỏi cả mirror
+            // LẪN cái tài liệu sinh ra để báo "đang thiếu gì". Đánh permanent làm TỐT HƠN cả hai
+            // chiều: bỏ retry vô ích + hiện trong manifest để người đọc biết đang thiếu gì.
             'cannotDownloadFile' => 'Not downloadable (chủ tắt quyền tải)',
         ];
         if ($reason !== null && isset($permanentReasons[$reason])) {
