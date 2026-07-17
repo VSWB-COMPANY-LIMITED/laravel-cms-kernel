@@ -525,10 +525,16 @@ class GDriveMirrorSync extends Command
                     ]);
                     return Command::FAILURE;
                 }
-                if (! is_writable($baseLocalPath)) {
-                    $this->error("\n🛑 Thư mục đích không ghi được (read-only): {$baseLocalPath}");
-                    $this->error("   Kiểm tra: ổ đĩa có đang ở chế độ read-only không? Quyền (permission) có đúng không?");
-                    Log::channel($this->log_channel)->error("GDrive Sync: preflight thất bại — đích read-only", [
+                // Ghi-thử THẬT thay cho is_writable(): is_writable() chỉ đọc bit quyền, KHÔNG
+                // phát hiện được ổ "báo ghi-được nhưng ghi-thật-lỗi". Sự cố THẬT 2026-07-18 (run
+                // 7fe28ffb): ổ exFAT ngoài /Volumes/WD-DATA1 hỏng I/O — is_writable()=true nhưng
+                // mkdir/ghi thật ném "Input/output error" (errno=5); preflight cũ lọt qua → list
+                // 227 item Drive → đụng circuit breaker sau 20 lỗi (~1 phút phí). Ghi thử 1 file
+                // thật bắt ổ wedged/read-only/hỏng NGAY, trước khi tốn công liệt kê Drive.
+                if (! self::writeProbe($baseLocalPath, $this->runId)) {
+                    $this->error("\n🛑 Thư mục đích không ghi được (read-only / lỗi I/O / ổ treo): {$baseLocalPath}");
+                    $this->error("   Ổ đĩa (đặc biệt exFAT ngoài) có thể đang lỗi I/O — thử rút/cắm lại, hoặc chạy Disk Utility First Aid; kiểm tra ổ còn read-write không.");
+                    Log::channel($this->log_channel)->error("GDrive Sync: preflight thất bại — đích không ghi thật được (read-only/I/O error)", [
                         'run_id' => $this->runId,
                         'base_local_path' => $baseLocalPath,
                     ]);
@@ -1333,6 +1339,40 @@ class GDriveMirrorSync extends Command
     public static function shouldAbortOnLocalFsErrors(int $consecutive, int $threshold = self::MAX_CONSECUTIVE_LOCAL_FS_ERRORS): bool
     {
         return $consecutive >= $threshold;
+    }
+
+    /**
+     * Ghi-thử THẬT vào thư mục: tạo 1 file probe → ghi → đọc lại → xoá. Trả về true CHỈ khi cả
+     * chuỗi thành công. Dùng cho preflight thay `is_writable()` — hàm chuẩn đó chỉ đọc bit quyền
+     * nên KHÔNG bắt được ổ "báo ghi-được nhưng ghi-thật-lỗi" (ổ exFAT ngoài hỏng I/O: is_writable
+     * =true nhưng file_put_contents/mkdir ném "Input/output error"). Suppress lỗi + bọc try/catch:
+     * mọi trục trặc ghi/đọc/xoá đều quy về false (KHÔNG throw ra ngoài — đây là hàm kiểm tra).
+     *
+     * $token (dùng runId) để 2 run song song không đụng file probe của nhau.
+     *
+     * ⚠️ GIỚI HẠN (đo thật 2026-07-18): probe fail-fast khi ổ trả lỗi NGAY (errno=5, read-only) —
+     * đó là ca của sự cố 7fe28ffb và là lúc probe hữu ích nhất (abort trước khi list Drive). NHƯNG
+     * khi ổ wedged NẶNG hơn (I/O treo hẳn, đến `mkdir`/`diskutil unmount` cũng đơ), file_put_contents
+     * cũng TREO — PHP không timeout được I/O file cục bộ mà không cần pcntl. Đây KHÔNG phải regression:
+     * ổ treo thì code cũ cũng treo ở lần ghi thật đầu tiên, probe chỉ dời điểm treo lên preflight.
+     * Ổ treo cứng = pathology phần cứng/OS, phải rút-cắm-lại/reboot; command không tự gỡ được.
+     */
+    public static function writeProbe(string $dir, string $token): bool
+    {
+        $probe = rtrim($dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . '.gdrive_write_probe_' . $token;
+        try {
+            if (@file_put_contents($probe, 'probe') === false) {
+                return false;
+            }
+            $ok = (@file_get_contents($probe) === 'probe');
+            @unlink($probe);
+
+            return $ok;
+        } catch (\Throwable $e) {
+            @unlink($probe);
+
+            return false;
+        }
     }
 
     /**

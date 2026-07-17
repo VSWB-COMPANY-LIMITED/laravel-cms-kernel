@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Fixed
+- **[GDriveMirrorSync] Preflight ghi-thử THẬT (`writeProbe()`) thay `is_writable()`.**
+  Sự cố THẬT 2026-07-18 (run `7fe28ffb`, mirror folder `HopDong_KhachHang/2026`): ổ exFAT ngoài
+  `/Volumes/WD-DATA1` hỏng I/O — `is_writable()` báo `true` nhưng `mkdir`/ghi thật ném
+  `"Input/output error"` (errno=5). Preflight cũ (chỉ `is_writable()`) lọt qua → list 227 item
+  Drive → mirror → đụng circuit breaker sau 20 lỗi filesystem liên tiếp (~1 phút phí; circuit
+  breaker HOẠT ĐỘNG ĐÚNG, abort sạch, 0 data-loss — nhưng lẽ ra bắt được sớm hơn). Fix: preflight
+  ghi 1 file probe thật (`file_put_contents` → đọc lại → xoá); fail → abort NGAY trước khi list
+  Drive. Bắt được ổ read-only / hỏng-I/O mà `is_writable()` bỏ sót.
+  ⚠️ Giới hạn đã đo & ghi rõ trong code: khi ổ wedged NẶNG (I/O treo hẳn, `mkdir`/`diskutil
+  unmount` cũng đơ) thì `file_put_contents` cũng treo — PHP không timeout I/O file cục bộ mà không
+  cần pcntl. KHÔNG regression (ổ treo thì code cũ cũng treo ở lần ghi đầu). Ổ treo cứng =
+  pathology phần cứng, phải rút-cắm-lại/reboot.
+  Test: `tests/Unit/GDriveWriteProbeTest.php` (4 test, thư mục tạm THẬT). Verify-live trên ổ
+  fast-error hoãn tới khi ổ hồi phục (hiện ổ đang treo cứng).
+
 ### Added
 - **[GDriveMirrorSync] Spreadsheet danh sách file lỗi — TỰ ĐỘNG xuất mỗi lần chạy có `failed_files` (mặc định BẬT, không cần cờ).**
   User dùng Excel trên macOS locale Việt Nam — JSON report cũ (`failed/failed-*.json`) không mở
