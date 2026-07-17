@@ -22,8 +22,8 @@ class GDriveUnexportableManifestTest extends TestCase
         return [
             'generated_at' => '2026-07-16T10:00:00+00:00',
             'run_id' => 'abcd1234',
-            'folder_ids' => ['0Bw6yYZTQJcm3aGoxTGJuY1p1ZU0'],
-            'base_local_path' => '/Volumes/WD-DATA1/OneDrive',
+            'folder_ids' => ['0BxFAKEFOLDERID_forTest_00000'],
+            'base_local_path' => '/mnt/backup/drive-mirror',
         ];
     }
 
@@ -192,7 +192,7 @@ class GDriveUnexportableManifestTest extends TestCase
 
         $this->assertStringContainsString('2026-07-16T10:00:00+00:00', $md);
         $this->assertStringContainsString('abcd1234', $md);
-        $this->assertStringContainsString('0Bw6yYZTQJcm3aGoxTGJuY1p1ZU0', $md);
-        $this->assertStringContainsString('/Volumes/WD-DATA1/OneDrive', $md);
+        $this->assertStringContainsString('0BxFAKEFOLDERID_forTest_00000', $md);
+        $this->assertStringContainsString('/mnt/backup/drive-mirror', $md);
     }
 }

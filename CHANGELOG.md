@@ -3,10 +3,36 @@
 ## [Unreleased]
 
 ### Fixed
+- **[GDriveMirrorSync][🔴🔴 1 lỗi đọc đĩa giết CẢ RUN] Guard I/O cho delta-check (`md5_file()`/`filesize()`/`File::lastModified()`).**
+  Phát hiện từ log THẬT (`storage/logs/pull.vn-2026-07-17.log` trên pull-server, run `f0547f35`
+  01:19:20): ổ đích exFAT ngoài (`/Volumes/WD-DATA1`) rớt kết nối giữa chừng khi `md5_file()` đang đọc
+  file local để so sánh delta → PHP ném `E_WARNING` `"md5_file(): Read of 8192 bytes failed with
+  errno=5 Input/output error"` → Laravel `HandleExceptions` biến WARNING thành `ErrorException` →
+  KHÔNG có try/catch nào trong vòng lặp bắt được (chưa có trước đây) → thoát thẳng ra try/catch NGOÀI
+  CÙNG của `handle()` → 💥 Fatal Error giết CẢ run (5760 item, kể cả item hoàn toàn khoẻ mạnh).
+  Fix: bọc toàn bộ khối delta-check trong try/catch `\Throwable`. Lỗi đọc local → KHÔNG skip, KHÔNG
+  fatal — coi như "không verify được bản local", rơi xuống nhánh download lại (self-heal, khớp hành
+  vi đã có sẵn cho size/MD5 mismatch). Log warning kèm `run_id`/`path`/`error`.
+- **[GDriveMirrorSync][🔴 retry vô ích khi ổ đĩa hỏng] Tách lỗi filesystem cục bộ khỏi `classifyDriveError()` + circuit breaker.**
+  Log THẬT (run `f0547f35` 01:19-01:21): hàng chục file liên tiếp lặp lại y hệt lỗi
+  `"mkdir(): Permission denied"` (mkdir gọi từ `File::ensureDirectoryExists()` bên trong callback
+  download của `withRetry()`) — mỗi file bị `classifyDriveError()` string-match nhầm thành
+  `'Permission denied'` retryable=true (đúng cho lỗi Drive API, SAI cho lỗi ổ đĩa cục bộ) → tốn 3 lần
+  retry × backoff (2+4+8=14s) MỖI FILE trong khi ổ đã hỏng — đốt ~2 phút chỉ để fail đều đặn.
+  Fix: `isLocalFsError()` (pure/static — nhận diện qua marker tên hàm PHP filesystem
+  `mkdir(`/`fopen(`/`md5_file(`/… + cụm `errno=5`/`input/output error`/`read-only file system`/
+  `no space left`; `"permission denied"` TRẦN chỉ nhận khi kèm đường dẫn tuyệt đối, tránh đoán nhầm
+  lỗi Drive 403 — nghiêng an toàn về `false` khi không chắc). `withRetry()` kiểm `isLocalFsError()`
+  TRƯỚC `classifyDriveError()`: nhận diện được → fail ngay, KHÔNG retry. Circuit breaker
+  `MAX_CONSECUTIVE_LOCAL_FS_ERRORS = 20`: vượt ngưỡng lỗi filesystem cục bộ LIÊN TIẾP → ABORT TOÀN BỘ
+  run (break khỏi cả 2 vòng foreach, vẫn chạy `finalReport()`), báo rõ đường dẫn ổ đích nghi hỏng.
+  Preflight đầu `handle()`: kiểm thư mục đích tồn tại/tạo được + ghi được TRƯỚC khi list Drive — tránh
+  lặp lại kịch bản run `b5200616` 08:54 (cày liệt kê Drive xong mới phát hiện đích không ghi được).
+  Test: `tests/Unit/GDriveLocalFsErrorTest.php` (16 test — message thật từ log + body JSON Drive thật,
+  hồi quy cho nguyên tắc bất đối xứng "không chắc → nghiêng retryable/không-abort").
 - **[GDriveMirrorSync][🔴🔴 GHI RÁC LÊN ĐĨA + BÁO THÀNH CÔNG] `streamDownloadViaApi()` không kiểm HTTP status.**
-  Phát hiện khi chạy sync THẬT folder "Accounting" (2719 item): file
-  `Chi_Phi_LuongNhanVien/LUONG LAP TRINH  EHOADON 247` (420 byte) chứa **JSON lỗi 403 của Google**
-  (`fileNotDownloadable`) thay vì nội dung — mà run vẫn báo `❌ Errors encountered: 0`.
+  Phát hiện khi chạy sync THẬT trên một folder ~2700 item: một file 420 byte trên đĩa chứa **JSON lỗi
+  403 của Google** (`fileNotDownloadable`) thay vì nội dung — mà run vẫn báo `❌ Errors encountered: 0`.
   Chuỗi nhân quả: file là `google-apps.shortcut` → không có trong `$exportMap` → bị coi là file nhị
   phân → `streamDownloadViaApi()` ghi thẳng body ra đĩa KHÔNG check status; `google/apiclient` set
   `http_errors=false` (Client.php:1265) nên Guzzle KHÔNG throw ở 4xx → `withRetry()` trả true →

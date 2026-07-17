@@ -147,6 +147,24 @@
  *          không DELETE — xem cleanup "removed for safety" trong handle()).
  *        • Đổi --path giữa các lần           → path mới sync từ đầu, path cũ nguyên vẹn.
  *
+ *     6) Lỗi filesystem CỤC BỘ (ổ đích hỏng/unmount/read-only/đầy dung lượng) — KHÁC lỗi
+ *        Drive API, xử lý riêng (kèm log thật storage/logs/pull.vn-2026-07-17.log):
+ *        • Khâu delta-check (md5_file()/filesize()/lastModified() đọc file local) được bọc
+ *          try/catch: lỗi đọc (vd ổ exFAT ngoài rớt kết nối giữa chừng — "errno=5 Input/output
+ *          error") KHÔNG làm fatal cả run, chỉ coi như "không verify được", rơi xuống tải lại
+ *          (self-heal, giống mục 4 ở trên).
+ *        • Trong retry loop (withRetry()): lỗi filesystem cục bộ (mkdir/fopen/md5_file() thất
+ *          bại, "Input/output error", "read-only file system", "no space left"…) KHÔNG được
+ *          retry (retry vô ích vì ổ vẫn hỏng ở lần thử kế tiếp) — fail ngay, khác lỗi Drive API
+ *          (rate-limit/5xx) vẫn retry bình thường.
+ *        • Circuit breaker: 20 lỗi filesystem cục bộ LIÊN TIẾP (không có item thành công xen
+ *          giữa) → ABORT TOÀN BỘ run (không chỉ 1 file/1 folder) — ổ đích gần như chắc chắn đã
+ *          unmount/read-only/hỏng, mirror tiếp chỉ phí thời gian. Vẫn in report + ghi log/JSON
+ *          report bình thường trước khi thoát.
+ *        • Preflight: đầu handle() (trước khi list Drive), kiểm tra thư mục đích tồn tại/tạo
+ *          được + ghi được — fail sớm thay vì cày liệt kê Drive xong mới phát hiện đích hỏng.
+ *          Bỏ qua preflight khi --dry-run (không ghi gì ra đích).
+ *
  *  ── BÁO CÁO FILE LỖI
  *     Sau mỗi lần chạy, nếu có file lỗi:
  *       • Console: in group theo loại lỗi (Permission / Network / Quota / Export Limit / …)
@@ -286,6 +304,12 @@
  *  là giới hạn CỨNG của API files.export, chỉ tải được bằng tay qua trình duyệt (link kèm sẵn
  *  trong manifest); file bị chủ khoá (cannotExportFile) thì không cách nào tải được, kể cả tay.
  *
+ *  Nếu ổ đích không ghi được NGAY TỪ ĐẦU (unmount/read-only), preflight sẽ chặn và thoát
+ *  Command::FAILURE trước khi list Drive (không tốn thời gian liệt kê). Nếu ổ hỏng GIỮA CHỪNG
+ *  (20 lỗi filesystem cục bộ liên tiếp — xem mục 6 phần "KHI FILE LOCAL ĐÃ TỒN TẠI" ở trên),
+ *  console in dòng "🛑 ABORT: … lỗi filesystem cục bộ liên tiếp" + Log::error, rồi vẫn in report
+ *  tổng kết bình thường (Command::SUCCESS — report phản ánh đúng số đã làm được trước khi abort).
+ *
  * ============================================================
  */
 
@@ -314,7 +338,8 @@ class GDriveMirrorSync extends Command
         {--dry-run : List remote items only, do NOT download. Prints first 20 items as a table for debugging}
         {--limit=0 : Only process first N items (0 = all). Useful for testing}
         {--retry-failed= : Path to a failed-report JSON (from a previous run); re-downloads only those items, skipping list/scan}
-        {--include-permanent : With --retry-failed, also re-attempt items marked permanent (403 vĩnh viễn — retry vô ích by default, skip)}';
+        {--include-permanent : With --retry-failed, also re-attempt items marked permanent (403 vĩnh viễn — retry vô ích by default, skip)}
+        {--allow-shrink : Bỏ qua chặn item-count sụt >20% so lần trước (LISTING_SHRINK_ABORT_RATIO) — chỉ dùng khi biết chắc cây đã thu nhỏ THẬT (user xoá bớt trên Drive), KHÔNG phải nghi ngờ Drive API liệt kê cụt}';
 
     /**
      * The console command description.
@@ -335,10 +360,42 @@ class GDriveMirrorSync extends Command
     protected string $baseLocalPath = '';
 
     /**
+     * BUG A: đếm số lần listFolderRecursiveViaApi() phát hiện listing lần đầu trả 0 item sai
+     * (verify lại có >0) — báo ra ở finalReport() để biết Drive API có đang "cụt" hay không,
+     * dù mirror lần này vẫn đủ nhờ đã tự khắc phục.
+     */
+    protected int $listingRetryHits = 0;
+
+    /**
      * Số report JSON tối đa giữ lại trong storage/app/gdrive-sync/failed/ — tự prune report
      * cũ hơn sau mỗi lần ghi để tránh tích luỹ vô hạn (command chạy qua cron định kỳ).
      */
     protected const MAX_FAILED_REPORTS = 10;
+
+    /**
+     * BUG A-3: ngưỡng chặn khi item-count của 1 folder gốc sụt so với lần chạy trước. Sụt
+     * >20% (còn lại <80% so lần trước) → nghi listing bị cụt (Drive API lỗi mà ta CHƯA biết
+     * nguyên nhân) → ABORT folder đó thay vì mirror đè lên 1 cây thiếu dữ liệu.
+     */
+    protected const LISTING_SHRINK_ABORT_RATIO = 0.8;
+
+    /**
+     * BUG D: đếm số lỗi filesystem CỤC BỘ (mkdir/fopen/md5_file.../ổ hỏng-unmount, xem
+     * isLocalFsError()) liên tiếp chưa gặp 1 item thành công nào xen giữa — reset về 0 mỗi khi
+     * 1 item (mkdir hoặc download) thành công. Dùng làm lưới an toàn thứ 2 (circuit breaker):
+     * lỗi Drive API có thể tự khỏi giữa các item, nhưng lỗi ổ đĩa cục bộ (unmount/read-only/hỏng)
+     * KHÔNG tự khỏi — nhiều lỗi liên tiếp chứng tỏ ổ đã hỏng chứ không phải "vài file xui".
+     */
+    protected int $consecutiveLocalFsErrors = 0;
+
+    /**
+     * Ngưỡng ABORT toàn bộ run khi $consecutiveLocalFsErrors vượt qua (xem
+     * shouldAbortOnLocalFsErrors()). 20 lỗi filesystem cục bộ LIÊN TIẾP = ổ đích gần như chắc
+     * chắn đã unmount/read-only/hỏng, không phải 20 file xui — mirror tiếp chỉ phí thời gian
+     * (log thật 2026-07-17 run f0547f35: hàng chục file liên tiếp cùng lỗi "mkdir(): Permission
+     * denied" trong 2 phút, ổ WD-DATA1 exFAT ngoài).
+     */
+    protected const MAX_CONSECUTIVE_LOCAL_FS_ERRORS = 20;
 
     /**
      * Google Native MimeTypes to Microsoft Office (OpenXML) Formats
@@ -373,6 +430,7 @@ class GDriveMirrorSync extends Command
         set_time_limit(0);
         $startedAt = microtime(true);
         $this->runId = substr(uniqid(), -8);
+        $this->listingRetryHits = 0;
 
         try {
             // 1. Initial Checks
@@ -437,6 +495,34 @@ class GDriveMirrorSync extends Command
                 ?: ($preloadedItems !== null && ! empty($json['base_local_path']) ? $json['base_local_path'] : storage_path('app/google_drive_mirror'));
             $baseLocalPath = realpath($rawPath) ?: $rawPath;
             $this->baseLocalPath = $baseLocalPath;
+
+            // PREFLIGHT (BUG D): kiểm tra đích ghi được TRƯỚC khi list Drive — tránh lặp lại
+            // kịch bản run b5200616 08:54 (log thật 2026-07-17): cày liệt kê Drive xong xuôi rồi
+            // MỚI phát hiện đích không ghi được (ổ exFAT ngoài đã unmount/đổi quyền), phí thời
+            // gian oan. Nếu thư mục CHƯA tồn tại (lần sync đầu tiên) → thử tạo mới thay vì abort
+            // ngay, vì "chưa có" là bình thường, khác với "có nhưng không ghi được". --dry-run
+            // chỉ liệt kê để debug, KHÔNG ghi gì ra đích → bỏ qua preflight cho chế độ này.
+            if (! $this->option('dry-run')) {
+                if (! is_dir($baseLocalPath) && ! @mkdir($baseLocalPath, 0755, true) && ! is_dir($baseLocalPath)) {
+                    $this->error("\n🛑 Không thể tạo thư mục đích: {$baseLocalPath}");
+                    $this->error("   Kiểm tra: ổ đĩa đã mount chưa? Đường dẫn cha có tồn tại/ghi được không?");
+                    Log::channel($this->log_channel)->error("GDrive Sync: preflight thất bại — không tạo được thư mục đích", [
+                        'run_id' => $this->runId,
+                        'base_local_path' => $baseLocalPath,
+                    ]);
+                    return Command::FAILURE;
+                }
+                if (! is_writable($baseLocalPath)) {
+                    $this->error("\n🛑 Thư mục đích không ghi được (read-only): {$baseLocalPath}");
+                    $this->error("   Kiểm tra: ổ đĩa có đang ở chế độ read-only không? Quyền (permission) có đúng không?");
+                    Log::channel($this->log_channel)->error("GDrive Sync: preflight thất bại — đích read-only", [
+                        'run_id' => $this->runId,
+                        'base_local_path' => $baseLocalPath,
+                    ]);
+                    return Command::FAILURE;
+                }
+            }
+
             $googleDisk = Storage::disk("google_drive_mirror");
 
             if ($preloadedItems !== null) {
@@ -452,7 +538,7 @@ class GDriveMirrorSync extends Command
                 }
             }
 
-            $stats = ['processed' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0, 'folders' => 0, 'failed_files' => [], 'collisions' => 0];
+            $stats = ['processed' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0, 'folders' => 0, 'failed_files' => [], 'collisions' => 0, 'total_listed' => 0];
 
             foreach ($targetIdentifiers as $identifier) {
                 $usedLocalPaths = []; // Reset per-folder to avoid cross-folder collision false-positives
@@ -556,6 +642,39 @@ class GDriveMirrorSync extends Command
 
                 $totalItems = count($remoteItems);
                 $this->info("Found {$totalItems} items.");
+                $stats['total_listed'] += $totalItems;
+
+                // BUG A-3 — LƯỚI AN TOÀN CUỐI CÙNG: so item-count folder gốc với lần chạy
+                // trước, KHÔNG PHỤ THUỘC nguyên nhân sụt giảm. BUG A-2 ở trên chỉ vá được cái
+                // ta ĐÃ biết (listing trả 0 sai); check này bắt cả nguyên nhân ta CHƯA biết
+                // (vd sụt một phần thay vì về hẳn 0). Đặt TRƯỚC --limit (tránh --limit làm
+                // remoteItems bị cắt rồi hiểu nhầm là "cây thu nhỏ thật") và TRƯỚC --dry-run.
+                // Bỏ qua khi không phải sync đầy đủ: --retry-failed nạp từ JSON (không phải từ
+                // listing thật, count không so được) và --dry-run (chỉ debug, không muốn ghi đè
+                // state bằng 1 lần chạy thử).
+                $isFullSync = $preloadedItems === null && ! $this->option('dry-run');
+                if ($isFullSync) {
+                    $folderTag = substr(md5((string) $identifier), 0, 8);
+                    $prevState = $this->readListingState($folderTag);
+                    $prevCount = isset($prevState['item_count']) ? (int) $prevState['item_count'] : null;
+
+                    if (! $this->option('allow-shrink') && self::shouldAbortOnShrink($prevCount, $totalItems)) {
+                        $dropPct = $prevCount > 0 ? round((1 - ($totalItems / $prevCount)) * 100, 1) : 0.0;
+                        $this->error("\n🛑 ABORT '{$identifier}': lần trước {$prevCount} item, lần này {$totalItems} item (giảm {$dropPct}%) — nghi liệt kê cụt, BỎ QUA để không mirror đè lên cây thiếu. Dùng --allow-shrink nếu chắc chắn cây đã thu nhỏ THẬT.");
+                        Log::channel($this->log_channel)->error("GDrive Sync: ABORT — item count sụt bất thường", [
+                            'run_id' => $this->runId,
+                            'folder_id' => (string) $identifier,
+                            'prev_count' => $prevCount,
+                            'current_count' => $totalItems,
+                            'drop_pct' => $dropPct,
+                        ]);
+                        continue;
+                    }
+
+                    // Chỉ cập nhật state khi listing được chấp nhận — folder bị abort ở trên
+                    // GIỮ NGUYÊN state cũ (con số tốt lần trước), không ghi đè bằng số nghi ngờ.
+                    $this->writeListingState($folderTag, (string) $identifier, $totalItems);
+                }
 
                 if ($totalItems === 0) {
                     // Im lặng trước đây → false-green khi chạy cron (list rỗng có thể là bug
@@ -615,8 +734,61 @@ class GDriveMirrorSync extends Command
 
                     if ($type === 'dir') {
                         if (!File::isDirectory($absoluteLocalPath)) {
-                            File::makeDirectory($absoluteLocalPath, 0755, true);
-                            $stats['folders']++;
+                            // BUG B (đã chứng minh bằng log thật): mkdir() Permission denied trên
+                            // 1 thư mục ném lên try/catch NGOÀI CÙNG của handle() → 💥 Fatal Error
+                            // → giết TOÀN BỘ mirror (5760 item) kể cả những item đã sẵn sàng.
+                            // Return value của File::makeDirectory() cũng bị bỏ qua trước đây —
+                            // $stats['folders']++ chạy bất kể thành công hay không. Giờ bọc
+                            // try/catch + kiểm kết quả: 1 thư mục hỏng chỉ ghi nhận lỗi cho riêng
+                            // nó rồi tiếp tục, KHÔNG được phép huỷ cả lần chạy.
+                            try {
+                                $created = File::makeDirectory($absoluteLocalPath, 0755, true);
+                            } catch (\Throwable $e) {
+                                $created = false;
+                                $this->lastError = $e->getMessage();
+                            }
+
+                            if ($created) {
+                                $stats['folders']++;
+                                // BUG D: item thành công → ổ đích còn ghi được, xoá dấu vết lỗi liên tiếp.
+                                $this->consecutiveLocalFsErrors = 0;
+                            } else {
+                                $stats['errors']++;
+                                $reason = $this->lastError ?? 'mkdir failed (unknown reason)';
+                                $classified = self::classifyDriveError($reason);
+                                $stats['failed_files'][] = [
+                                    'type' => 'dir',
+                                    'path' => $relativePath,
+                                    'id' => null,
+                                    'mimeType' => null,
+                                    'md5Checksum' => null,
+                                    'timestamp' => 0,
+                                    'size' => 0,
+                                    'attempts' => 0,
+                                    'reason' => $reason,
+                                    'permanent' => ! $classified['retryable'],
+                                    'error_reason' => $classified['reason'],
+                                    'category' => $classified['category'],
+                                ];
+                                Log::channel($this->log_channel)->error("GDrive Sync: mkdir failed", [
+                                    'run_id' => $this->runId,
+                                    'path' => $relativePath,
+                                    'absolute_path' => $absoluteLocalPath,
+                                    'error' => $reason,
+                                ]);
+                                $this->error("\n   ❌ Failed to create folder: {$relativePath} | Reason: {$reason}");
+
+                                // BUG D: mkdir() luôn là lỗi filesystem cục bộ (không phải Drive API)
+                                // — đếm vào circuit breaker riêng, ABORT nếu vượt ngưỡng.
+                                if (self::isLocalFsError($reason)) {
+                                    $this->consecutiveLocalFsErrors++;
+                                    if (self::shouldAbortOnLocalFsErrors($this->consecutiveLocalFsErrors)) {
+                                        $bar->finish();
+                                        $this->abortForLocalFsErrors($baseLocalPath);
+                                        break 2;
+                                    }
+                                }
+                            }
                         }
                         $bar->advance();
                         continue;
@@ -704,27 +876,48 @@ class GDriveMirrorSync extends Command
                         // Delta Sync: size mismatch is a cheap pre-check (detects truncation/corruption
                         // without reading whole file). MD5 is authoritative when available. Timestamp
                         // is fallback for Google Native files (which have no md5Checksum).
+                        //
+                        // 🔴 BUG C (đã chứng minh bằng log thật, storage/logs/pull.vn-2026-07-17.log
+                        // run f0547f35 01:19:20): md5_file() đọc file trên ổ exFAT ngoài rớt kết nối
+                        // giữa chừng ném E_WARNING "md5_file(): Read of 8192 bytes failed with
+                        // errno=5 Input/output error". Laravel HandleExceptions biến WARNING thành
+                        // ErrorException → KHÔNG có try/catch nào trong vòng lặp bắt được (trước đây)
+                        // → thoát thẳng ra try/catch NGOÀI CÙNG của handle() → 💥 Fatal Error giết CẢ
+                        // run (5760 item, kể cả item hoàn toàn khoẻ mạnh). File::lastModified() cũng
+                        // đọc filesystem nên chịu rủi ro tương tự. Bọc try/catch: 1 lỗi đọc local
+                        // KHÔNG được phép huỷ cả run — coi như "không verify được bản local", rơi
+                        // xuống nhánh download lại bên dưới (self-heal, khớp docblock mục 4 "An toàn
+                        // khi crash giữa chừng" — vốn đã coi size/MD5 mismatch là tín hiệu tải lại).
                         if (!$this->option('force') && File::exists($targetLocalPath)) {
-                            $localSize = (int) @filesize($targetLocalPath);
+                            try {
+                                $localSize = (int) @filesize($targetLocalPath);
 
-                            // Size pre-check: only meaningful for regular files. Google Native files
-                            // have a "native" remote size that differs from the post-export local size,
-                            // so comparing them would falsely trigger re-download every run.
-                            if (! $exportSpec && $remoteSize > 0 && $localSize > 0 && $localSize !== $remoteSize) {
-                                // size mismatch → re-download (don't waste md5 hash on a wrong-size file)
-                            } elseif ($remoteMd5) {
-                                // MD5 available: skip only if content is identical
-                                if (md5_file($targetLocalPath) === $remoteMd5) {
+                                // Size pre-check: only meaningful for regular files. Google Native files
+                                // have a "native" remote size that differs from the post-export local size,
+                                // so comparing them would falsely trigger re-download every run.
+                                if (! $exportSpec && $remoteSize > 0 && $localSize > 0 && $localSize !== $remoteSize) {
+                                    // size mismatch → re-download (don't waste md5 hash on a wrong-size file)
+                                } elseif ($remoteMd5) {
+                                    // MD5 available: skip only if content is identical
+                                    if (md5_file($targetLocalPath) === $remoteMd5) {
+                                        $stats['skipped']++;
+                                        $bar->advance();
+                                        continue;
+                                    }
+                                    // MD5 mismatch means file changed → must re-download, ignore timestamp
+                                } elseif (File::lastModified($targetLocalPath) >= $remoteTimestamp) {
+                                    // No MD5 (Google Native): fall back to timestamp
                                     $stats['skipped']++;
                                     $bar->advance();
                                     continue;
                                 }
-                                // MD5 mismatch means file changed → must re-download, ignore timestamp
-                            } elseif (File::lastModified($targetLocalPath) >= $remoteTimestamp) {
-                                // No MD5 (Google Native): fall back to timestamp
-                                $stats['skipped']++;
-                                $bar->advance();
-                                continue;
+                            } catch (\Throwable $e) {
+                                Log::channel($this->log_channel)->warning("GDrive Sync: delta-check I/O error, forcing re-download", [
+                                    'run_id' => $this->runId,
+                                    'path' => $relativePath,
+                                    'error' => $e->getMessage(),
+                                ]);
+                                // Không skip, không fatal — rơi xuống nhánh download lại bên dưới.
                             }
                         }
 
@@ -773,6 +966,8 @@ class GDriveMirrorSync extends Command
                         if ($success) {
                             @touch($targetLocalPath, $remoteTimestamp);
                             $stats['updated']++;
+                            // BUG D: item thành công → ổ đích còn ghi được, xoá dấu vết lỗi liên tiếp.
+                            $this->consecutiveLocalFsErrors = 0;
                         } else {
                             $stats['errors']++;
                             $reason = $this->lastError ?? 'Unknown Error';
@@ -796,6 +991,14 @@ class GDriveMirrorSync extends Command
                                 'category' => $classified['category'],
                             ];
                             $this->error("\n   ❌ Failed to sync: {$relativePath} | Attempts: {$this->lastAttempts} | Reason: {$reason}");
+
+                            // BUG D: withRetry() đã đếm $consecutiveLocalFsErrors khi đây là lỗi
+                            // filesystem cục bộ (xem withRetry()) — kiểm ngưỡng, ABORT nếu vượt.
+                            if (self::shouldAbortOnLocalFsErrors($this->consecutiveLocalFsErrors)) {
+                                $bar->finish();
+                                $this->abortForLocalFsErrors($baseLocalPath);
+                                break 2;
+                            }
                         }
                     }
                     $bar->advance();
@@ -810,11 +1013,31 @@ class GDriveMirrorSync extends Command
 
         } catch (\Throwable $th) {
             $this->error("\n💥 Fatal Error: " . $th->getMessage());
-            Log::channel($this->log_channel)->error("GDrive Mirror Fatal Exception", ['msg' => $th->getMessage(), 'trace' => $th->getTraceAsString()]);
+            // run_id: entry này TỪNG là log duy nhất của command thiếu run_id — đúng cái entry
+            // quan trọng nhất (fatal). Điều tra sự cố 2026-07-17 phải suy ra run bằng cách so
+            // giờ với các dòng STARTED lân cận (và suy nhầm). Fatal cần truy vết được như mọi
+            // entry khác — xem docblock "OUTPUT VÀ LOG".
+            Log::channel($this->log_channel)->error("GDrive Mirror Fatal Exception", ['run_id' => $this->runId, 'msg' => $th->getMessage(), 'trace' => $th->getTraceAsString()]);
             return Command::FAILURE;
         }
 
         return Command::SUCCESS;
+    }
+
+    /**
+     * BUG D: in + log thông báo ABORT toàn bộ run khi $consecutiveLocalFsErrors vượt ngưỡng
+     * (xem shouldAbortOnLocalFsErrors()). Tách riêng vì được gọi từ 2 chỗ trong handle() (nhánh
+     * mkdir thư mục và nhánh download file) — cả 2 đều phải break khỏi cả 2 vòng foreach ngay
+     * sau khi gọi, nên method này chỉ báo/log, KHÔNG tự break (không thể break thay caller).
+     */
+    protected function abortForLocalFsErrors(string $baseLocalPath): void
+    {
+        $this->error("\n🛑 ABORT: {$this->consecutiveLocalFsErrors} lỗi filesystem cục bộ liên tiếp — ổ đích có thể đã unmount/read-only/hỏng, kiểm tra: {$baseLocalPath}");
+        Log::channel($this->log_channel)->error("GDrive Sync: ABORT — quá nhiều lỗi filesystem cục bộ liên tiếp", [
+            'run_id' => $this->runId,
+            'consecutive_local_fs_errors' => $this->consecutiveLocalFsErrors,
+            'base_local_path' => $baseLocalPath,
+        ]);
     }
 
     /**
@@ -836,6 +1059,27 @@ class GDriveMirrorSync extends Command
                 $this->lastAttempts = $attempts;
                 $msg = $e->getMessage();
                 $this->lastError = $msg;
+
+                // BUG D: lỗi filesystem CỤC BỘ (mkdir/fopen/md5_file.../ổ hỏng) KHÔNG PHẢI lỗi
+                // Drive API — retry vô ích vì nguyên nhân (ổ unmount/read-only/hỏng) không tự
+                // khỏi giữa các lần thử cách nhau vài giây. PHẢI kiểm TRƯỚC classifyDriveError():
+                // message "mkdir(): Permission denied" rơi vào nhánh string-match
+                // "permission"/"forbidden" của classifyDriveError() → bị gán retryable=true (ĐÚNG
+                // cho lỗi Drive thật, SAI cho lỗi ổ đĩa cục bộ) → tốn 3 lần retry × backoff
+                // (2+4+8=14s) MỖI FILE trong khi ổ đã hỏng. Log thật (run f0547f35 2026-07-17
+                // 01:19-01:21): hàng chục file liên tiếp lặp lại y hệt "mkdir(): Permission denied",
+                // đốt ~2 phút chỉ để fail — không retry giúp fail nhanh, đúng bản chất lỗi.
+                if (self::isLocalFsError($msg)) {
+                    $this->consecutiveLocalFsErrors++;
+                    $this->warn("\n      ⚠️  Local filesystem error — không retry (ổ đích có thể hỏng/unmount).");
+                    Log::channel($this->log_channel)->warning("GDrive Sync: local filesystem error, not retrying", [
+                        'run_id' => $this->runId,
+                        'path' => $path,
+                        'error' => $msg,
+                        'consecutive_local_fs_errors' => $this->consecutiveLocalFsErrors,
+                    ]);
+                    return false;
+                }
 
                 $classified = self::classifyDriveError($msg);
 
@@ -989,25 +1233,224 @@ class GDriveMirrorSync extends Command
     }
 
     /**
+     * BUG D: nhận diện lỗi filesystem CỤC BỘ (mkdir/fopen/md5_file()/filesize() thất bại, ổ đầy,
+     * ổ read-only, I/O error khi ổ ngoài rớt kết nối…) — KHÁC HẲN lỗi Drive API mà
+     * classifyDriveError() xử lý. Pure/static (không đụng $this/facade) để unit test không cần
+     * boot Laravel — xem GDriveLocalFsErrorTest.
+     *
+     * Vì sao cần tách riêng khỏi classifyDriveError(): lỗi ổ đĩa cục bộ (unmount/read-only/hỏng)
+     * KHÔNG tự khỏi giữa các lần retry cách nhau vài giây — khác hẳn lỗi Drive API (rate-limit,
+     * 5xx) vốn CÓ cơ hội tự khỏi. Để lỗi này lọt qua classifyDriveError() sẽ bị nhánh string-match
+     * "permission"/"forbidden" gán retryable=true (đúng cho Drive, sai cho ổ đĩa) → phí backoff.
+     *
+     * 🔴 NGUYÊN TẮC BẤT ĐỐI XỨNG (giống classifyDriveError): hai chiều đoán sai KHÔNG cân xứng —
+     *   • Đoán nhầm lỗi Drive THÀNH local-FS → ABORT OAN cả run (mất mirror thật, NẶNG).
+     *   • Đoán nhầm lỗi local-FS THÀNH Drive → chỉ phí vài lần retry vô ích (NHẸ, ~14s/file).
+     * → Khi không chắc chắn, LUÔN nghiêng về FALSE (không phải local-FS). Vì vậy "permission
+     *   denied" TRẦN (không kèm tên hàm PHP hay đường dẫn tuyệt đối) bị coi là KHÔNG PHẢI
+     *   local-FS — chuỗi này cũng xuất hiện ở lỗi Drive 403 (forbidden/insufficient permissions).
+     */
+    public static function isLocalFsError(string $msg): bool
+    {
+        if ($msg === '') {
+            return false;
+        }
+        $m = strtolower($msg);
+
+        // Marker cứng — luôn là lỗi filesystem cục bộ dù không kèm gì khác. Drive API KHÔNG BAO
+        // GIỜ trả các cụm này trong message JSON (message của Google luôn là câu tiếng Anh mô tả
+        // lỗi quyền/quota/export, không phải lỗi đọc/ghi đĩa vật lý).
+        $hardMarkers = [
+            'input/output error',
+            'errno=5',
+            'read-only file system',
+            'no space left',
+        ];
+        foreach ($hardMarkers as $marker) {
+            if (str_contains($m, $marker)) {
+                return true;
+            }
+        }
+
+        // Tên hàm PHP filesystem xuất hiện trong message dạng "mkdir(): Permission denied" hay
+        // "fopen(/path/...): Failed to open stream: ...". Message lỗi Drive API (JSON hoặc câu
+        // tiếng Anh của Google) không bao giờ chứa "tên_hàm(" ngay sau tên hàm PHP như vậy.
+        $fsFunctionMarkers = [
+            'mkdir(', 'fopen(', 'md5_file(', 'filesize(', 'file_put_contents(',
+            'file_get_contents(', 'rename(', 'unlink(', 'copy(', 'chmod(', 'touch(',
+            'is_writable(', 'is_readable(', 'rmdir(', 'stream_copy_to_stream(', 'fwrite(',
+        ];
+        foreach ($fsFunctionMarkers as $marker) {
+            if (str_contains($m, $marker)) {
+                return true;
+            }
+        }
+
+        // "permission denied" TRẦN (không có tên hàm PHP đi kèm) — CHỈ coi là local-FS khi kèm
+        // một đường dẫn tuyệt đối (dấu hiệu rõ ràng đây là lỗi hệ điều hành, không phải Drive
+        // API). Xem nguyên tắc bất đối xứng ở trên: không chắc chắn → nghiêng về false.
+        if (str_contains($m, 'permission denied') && preg_match('#(?:^|[\s(:])/[\w./\-]+#', $msg) === 1) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * BUG D: quyết định có nên ABORT toàn bộ run vì quá nhiều lỗi filesystem cục bộ LIÊN TIẾP
+     * hay không (circuit breaker). Pure/static (không đụng $this/facade) để unit test không cần
+     * boot Laravel — xem GDriveLocalFsErrorTest. Cùng pattern với shouldAbortOnShrink().
+     *
+     * @param int $consecutive số lỗi filesystem cục bộ liên tiếp (chưa gặp item thành công nào xen giữa)
+     * @param int $threshold   ngưỡng chặn (mặc định MAX_CONSECUTIVE_LOCAL_FS_ERRORS = 20)
+     */
+    public static function shouldAbortOnLocalFsErrors(int $consecutive, int $threshold = self::MAX_CONSECUTIVE_LOCAL_FS_ERRORS): bool
+    {
+        return $consecutive >= $threshold;
+    }
+
+    /**
+     * BUG A-3: quyết định có nên ABORT một folder gốc vì item-count sụt bất thường so với lần
+     * chạy trước hay không. Pure/static (không đụng $this/facade) để unit test không cần boot
+     * Laravel — xem GDriveListingGuardTest.
+     *
+     * $prevCount === null (chưa từng chạy/chưa có state) hoặc === 0 (tránh chia cho 0, và lần
+     * trước vốn đã 0 thì không có gì để "sụt" thêm) → luôn KHÔNG abort.
+     *
+     * @param int|null $prevCount    item-count lần chạy trước (null = chưa có state)
+     * @param int      $currentCount item-count lần chạy này
+     * @param float    $ratio       ngưỡng chấp nhận tối thiểu (0.8 = còn lại ≥80% mới KHÔNG abort)
+     */
+    public static function shouldAbortOnShrink(?int $prevCount, int $currentCount, float $ratio = self::LISTING_SHRINK_ABORT_RATIO): bool
+    {
+        if ($prevCount === null || $prevCount === 0) {
+            return false;
+        }
+
+        return $currentCount < $prevCount * $ratio;
+    }
+
+    /**
+     * Đọc state item-count lần chạy trước của 1 folder gốc (BUG A-3). Không có file/không đọc
+     * được/JSON hỏng → coi như chưa có state (null), KHÔNG làm fail cả sync vì lý do này.
+     */
+    protected function readListingState(string $folderTag): ?array
+    {
+        $path = storage_path('app/gdrive-sync/state/' . $folderTag . '.json');
+        if (! is_file($path) || ! is_readable($path)) {
+            return null;
+        }
+
+        $data = json_decode((string) file_get_contents($path), true);
+
+        return is_array($data) ? $data : null;
+    }
+
+    /**
+     * Ghi state item-count của lần chạy này (BUG A-3) — chỉ gọi khi listing đã được CHẤP NHẬN
+     * (không bị abort). Lỗi ghi chỉ warn, không làm fail cả sync (state chỉ là lưới an toàn cho
+     * lần chạy SAU, không phải dữ liệu bắt buộc cho lần chạy hiện tại).
+     */
+    protected function writeListingState(string $folderTag, string $folderId, int $itemCount): void
+    {
+        $stateDir = storage_path('app/gdrive-sync/state');
+        if (! is_dir($stateDir) && ! @mkdir($stateDir, 0755, true) && ! is_dir($stateDir)) {
+            $this->warn("⚠️  Could not create state dir: {$stateDir}");
+            return;
+        }
+
+        $payload = [
+            'folder_id' => $folderId,
+            'item_count' => $itemCount,
+            'listed_at' => date('c'),
+            'run_id' => $this->runId,
+        ];
+
+        $path = $stateDir . DIRECTORY_SEPARATOR . $folderTag . '.json';
+        if (@file_put_contents($path, json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) === false) {
+            $this->warn("⚠️  Could not write listing state: {$path}");
+        }
+    }
+
+    /**
      * Recursively list a folder via Drive API. Returns items in masbug-compatible shape
      * (arrays with type/path/id/mimeType/md5Checksum/timestamp). Used in service-account mode
      * because masbug's listContents on a folder-id root returns nothing.
+     *
+     * 🔴 BUG A (đã chứng minh bằng dữ liệu thật): Drive `files.list` thỉnh thoảng trả mảng
+     * RỖNG cho một folder CÓ con (nghi do áp lực/rate-limit khi nhiều job gọi API song song —
+     * đo được: cùng 1 folder lúc 0 con, lúc 3041 con). fetchFolderChildrenViaApi() tin ngay kết
+     * quả rỗng thì bỏ nguyên cây con mà KHÔNG có dấu vết gì (không exception, không file lỗi).
+     * → Ở đây, nếu 1 lần gọi trả về 0 item, XÁC MINH LẠI 1 lần trước khi chấp nhận là thật.
+     * Chi phí 1 request thừa (folder rỗng thật là hiếm) rẻ hơn rất nhiều so với mất cả cây con
+     * trong im lặng. Áp dụng ở MỌI cấp đệ quy (không chỉ folder gốc) vì bug xảy ra ở subfolder.
      */
     protected function listFolderRecursiveViaApi($service, string $folderId, string $relativePath = ''): array
+    {
+        $items = $this->fetchFolderChildrenViaApi($service, $folderId, $relativePath);
+
+        if (! empty($items)) {
+            return $items;
+        }
+
+        $logPath = $relativePath !== '' ? $relativePath : '(root)';
+        sleep(1);
+        $secondItems = $this->fetchFolderChildrenViaApi($service, $folderId, $relativePath);
+
+        if (empty($secondItems)) {
+            // Folder rỗng thật (hợp lệ, không phải bug) — đừng spam warning ở mức log lỗi.
+            Log::channel($this->log_channel)->info("GDrive Sync: folder xác nhận rỗng (0 item cả 2 lần)", [
+                'run_id' => $this->runId,
+                'path' => $logPath,
+                'folder_id' => $folderId,
+            ]);
+            return [];
+        }
+
+        // Lần 2 ra >0 → đây chính là BUG A: lần liệt kê đầu bị Drive API cụt.
+        $this->listingRetryHits++;
+        Log::channel($this->log_channel)->warning("GDrive Sync: listing trả 0 nhưng verify lại có item — Drive API cụt", [
+            'run_id' => $this->runId,
+            'path' => $logPath,
+            'folder_id' => $folderId,
+            'second_count' => count($secondItems),
+        ]);
+
+        return $secondItems;
+    }
+
+    /**
+     * Liệt kê 1 lượt (đủ phân trang) các con TRỰC TIẾP + đệ quy con-của-con của $folderId qua
+     * Drive API. Tách riêng khỏi listFolderRecursiveViaApi() để lời gọi có thể được lặp lại
+     * (verify-on-zero ở trên) mà không đệ quy lại chính nó.
+     */
+    protected function fetchFolderChildrenViaApi($service, string $folderId, string $relativePath): array
     {
         $items = [];
         $pageToken = null;
         $query = sprintf("'%s' in parents and trashed = false", str_replace("'", "\\'", $folderId));
+        $logPath = $relativePath !== '' ? $relativePath : '(root)';
 
         do {
-            $response = $service->files->listFiles([
-                'q' => $query,
-                'pageSize' => 1000,
-                'fields' => 'nextPageToken, files(id, name, mimeType, modifiedTime, md5Checksum, size)',
-                'pageToken' => $pageToken,
-                'supportsAllDrives' => true,
-                'includeItemsFromAllDrives' => true,
-            ]);
+            // BUG A-1: đây là chỗ DUY NHẤT không được bọc withRetry() — mọi download đều có
+            // retry, riêng khâu liệt kê thì trước đây không, nên 1 lỗi mạng thoáng qua rơi
+            // thẳng ra ngoài. Nếu retry hết lượt vẫn lỗi (hoặc lỗi permanent), withRetry() đã
+            // tự log đầy đủ — ở đây chỉ dừng phân trang, trả về những gì đã gom được thay vì
+            // ném exception giết cả sync (xem BUG B).
+            $response = $this->withRetry(function () use ($service, $query, $pageToken) {
+                return $service->files->listFiles([
+                    'q' => $query,
+                    'pageSize' => 1000,
+                    'fields' => 'nextPageToken, files(id, name, mimeType, modifiedTime, md5Checksum, size)',
+                    'pageToken' => $pageToken,
+                    'supportsAllDrives' => true,
+                    'includeItemsFromAllDrives' => true,
+                ]);
+            }, $logPath);
+
+            if ($response === false) {
+                break;
+            }
 
             foreach ($response->getFiles() as $file) {
                 $isFolder = $file->getMimeType() === 'application/vnd.google-apps.folder';
@@ -1178,6 +1621,10 @@ class GDriveMirrorSync extends Command
         $this->comment("⚠️ Collisions:       {$stats['collisions']}");
         $this->comment("❌ Errors encountered: {$stats['errors']} (permanent: {$permanentCount}, retryable: {$retryableCount})");
 
+        if ($this->listingRetryHits > 0) {
+            $this->warn("⚠️ Listing trả 0 sai {$this->listingRetryHits} lần (đã tự verify + khắc phục) — Drive API không ổn định, mirror lần này vẫn đủ.");
+        }
+
         // Log Summary
         Log::channel($this->log_channel)->info("GDrive Mirror Sync COMPLETED", [
             'run_id' => $this->runId,
@@ -1190,6 +1637,8 @@ class GDriveMirrorSync extends Command
             'path'    => $baseLocalPath,
             'duration_sec' => $durationSec,
             'unexportable_manifest' => $unexportableManifestPath,
+            'listing_retry_hits' => $this->listingRetryHits,
+            'item_count' => $stats['total_listed'] ?? 0,
         ]);
 
         if (!empty($stats['failed_files'])) {
