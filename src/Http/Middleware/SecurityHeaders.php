@@ -135,7 +135,7 @@ class SecurityHeaders
             "style-src 'self' 'unsafe-inline' https: http:", // Cho phép CDN và inline styles
             "img-src 'self' data: https: http:", // Cho phép images từ mọi nguồn HTTPS/HTTP
             "font-src 'self' data: https: http:", // Cho phép fonts từ CDN
-            "connect-src 'self' https: http:", // Cho phép AJAX/fetch từ mọi nguồn HTTPS/HTTP
+            "connect-src 'self' https: http: wss: ws:", // Cho phép AJAX/fetch + WebSocket realtime (Echo/socket.io ws.pull.vn)
             "frame-src 'self' https:", // Cho phép iframes từ HTTPS
             "object-src 'none'", // Không cho phép object/embed
             "base-uri 'self'", // Chỉ cho phép base tag từ same origin
