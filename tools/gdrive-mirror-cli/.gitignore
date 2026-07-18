@@ -1,0 +1,10 @@
+# Build artifacts — regenerable via `go build` / cross-compile loop (xem README).
+/dist/
+*.exe
+
+# Credentials — KHÔNG BAO GIỜ commit service-account JSON.
+google-service-account-credentials.json
+*credentials*.json
+
+# Report output do tool sinh.
+/gdrive-mirror-reports/
