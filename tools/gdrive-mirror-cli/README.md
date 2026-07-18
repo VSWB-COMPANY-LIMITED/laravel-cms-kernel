@@ -51,6 +51,10 @@ gdrive-mirror 0Bw6yYZTQJcm3aGoxTGJuY1p1ZU0 \
   --retry=10 --concurrency=8
 ```
 
+Step-by-step sample commands per OS (macOS / Linux / Windows) — including
+dry-run → limited test → full run, scheduling (cron/launchd/systemd/Task
+Scheduler), and troubleshooting: **[RUN-SAMPLES.md](RUN-SAMPLES.md)**.
+
 ## Behavior (ported from the PHP source — see its docblock for the full story)
 
 - **Delta sync**: `--force` always re-downloads; regular files compare
