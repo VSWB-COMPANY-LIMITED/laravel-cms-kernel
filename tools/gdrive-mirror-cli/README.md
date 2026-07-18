@@ -73,11 +73,48 @@ Scheduler), and troubleshooting: **[RUN-SAMPLES.md](RUN-SAMPLES.md)**.
 - **Preflight write-probe**: before listing anything, a real file is
   written/read/deleted at the destination — catches a disk that reports
   writable but actually errors on real I/O. Skipped in `--dry-run`.
-- **Downloads are atomic**: written to a `.tmp-<runID>` file, renamed into
-  place only on full success — a crash mid-transfer never leaves a
-  truncated file at the real path.
-- **Name collisions** (two different Drive IDs mapping to the same local
-  path within one run) get the first 8 chars of the file ID appended.
+- **Downloads are atomic**: written to a fixed-length hidden temp file next
+  to the real target (`.` + 8 hex chars of `sha256(targetPath)` + `-<runID>`
+  + `.tmp`), renamed into place only on full success — a crash mid-transfer
+  never leaves a truncated file at the real path. The temp filename's length
+  never depends on the target's own name length, so it can never itself blow
+  past the 255-byte component limit below.
+- **Local names are sanitized on EVERY OS**, not just when running on
+  Windows — a mirror built on macOS/Linux has to stay openable if the disk
+  is later plugged into a Windows machine. For every file/folder name Drive
+  returns (`internal/localpath.SanitizeComponent`):
+  - Characters NTFS refuses (`< > : " | ? * \ /`) and control characters are
+    replaced with `_`.
+  - Trailing dots/spaces are trimmed (Windows silently drops these).
+  - A name that becomes empty after the above (including bare `.` or `..`)
+    falls back to `_`.
+  - Windows-reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`,
+    `LPT1-9`) get `_` appended, e.g. `CON.txt` → `CON_.txt`.
+  - The result is capped at **255 UTF-8 bytes** per path component
+    (`internal/localpath.TruncateComponent`), cutting only on a rune
+    boundary (never splits a multi-byte character) and appending a 6-hex-char
+    hash of the original name when a real cut happens, so two different long
+    names never collapse onto the same truncated one.
+- **Name collisions are resolved at LISTING time**, as one shared namespace
+  across files AND folders in the same parent (a folder and a file with the
+  same Drive name collide just as much as two files do). Decision order is
+  by **Drive file ID, ascending** — never by `files.list` response order,
+  which Drive does not guarantee stable between two calls — so the same set
+  of Drive items always produces the same local names regardless of which
+  order Drive happens to return them in. The loser of a collision gets the
+  first 8 chars of its file ID appended before the extension (e.g.
+  `report.pdf` → `report_1JP7CIBW.pdf`); the dedup key is lower-cased because
+  the destination filesystem may be NTFS/APFS, both case-insensitive by
+  default, so `Report.pdf` and `report.pdf` are the same collision even
+  though Drive treats them as two distinct files. Every collision increments
+  `Stats.Collisions` and logs a warning with the old/new name and file ID.
+- **Every resolved local path is re-validated against `--path`**
+  (`internal/localpath.SafeJoin`) immediately before any directory/file is
+  created — defense-in-depth against a Drive item name containing `/` or
+  `..` that could otherwise write outside the destination directory. A
+  rejection is a permanent failure (goes to the failed-items report) and
+  never counts toward the local-fs circuit breaker below — a hostile or
+  malformed remote name is not evidence the destination disk is failing.
 - **Listing "verify on zero"**: a folder reported empty is re-checked once
   after a 1s pause before being trusted — Drive's `files.list` has been
   observed to return an empty page for a folder that actually has children
@@ -96,6 +133,21 @@ When any item fails, two reports are written to
   `,` gets misread as a decimal separator under VN locale Excel), columns
   `file;path;size;category;error_reason;permanent;drive_link`, sorted
   permanent-first then by category then by size descending.
+
+## Upgrading an existing mirror (one-time, read this first)
+
+Name sanitizing changes what some files are *called* on disk. Because this
+tool **never deletes local files**, the first run after upgrading leaves the
+old copy in place and downloads the new name alongside it — a duplicate, not
+a loss. Only files whose Drive name actually contained something unsafe are
+affected (forbidden characters, trailing dots/spaces, a reserved device name,
+over 255 bytes, or a case-only clash with a sibling); a mirror of ordinary
+names is completely unaffected and re-runs as a normal no-op delta sync.
+
+Recommended: run once, then diff the destination against the previous run
+(or check the `Collisions` count in the summary) and delete the stale
+originals by hand. Deleting them automatically is deliberately not offered —
+one-way-never-delete is the safety property this tool is built around.
 
 ## Known gaps vs. the PHP source (deferred, not in this MVP)
 
@@ -118,6 +170,7 @@ When any item fails, two reports are written to
 ```
 main.go                       CLI flag parsing + orchestration entrypoint
 internal/classify/            Pure error-classification helpers (unit tested)
+internal/localpath/           Pure name-sanitize/truncate/safe-join helpers (unit tested)
 internal/mirror/              List/delta/download/retry/circuit-breaker/worker-pool
 internal/report/              Failed-item JSON + Excel-safe CSV report writers
 ```

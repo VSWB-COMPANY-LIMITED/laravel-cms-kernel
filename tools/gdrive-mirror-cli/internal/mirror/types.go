@@ -33,8 +33,15 @@ var ExportMap = map[string]ExportSpec{
 // Item is one Drive entry discovered during recursive listing, in a shape
 // analogous to GDriveMirrorSync::fetchFolderChildrenViaApi()'s array items.
 type Item struct {
-	Type         string // "dir" | "file"
-	Path         string // relative path from the sync root, using '/' separators
+	Type string // "dir" | "file"
+	// Path is the relative path from the sync root, using '/' separators.
+	// Every path component in it has ALREADY been through
+	// localpath.SanitizeComponent + localpath.TruncateComponent and deduped
+	// against its siblings (see list.go resolveSiblingNames) — for a file,
+	// this already includes the export extension (".docx"…) when applicable.
+	// It is safe to use directly as a local path once joined with the
+	// destination root via localpath.SafeJoin.
+	Path         string
 	ID           string
 	MimeType     string
 	MD5Checksum  string // "" when Drive doesn't provide one (Google-native files)

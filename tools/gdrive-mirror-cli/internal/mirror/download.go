@@ -3,6 +3,7 @@ package mirror
 import (
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"net/http"
@@ -34,7 +35,7 @@ func (s *Syncer) downloadItem(ctx context.Context, targetPath string, item Item,
 	}
 	defer resp.Body.Close()
 
-	tmpPath := targetPath + ".tmp-" + s.runID
+	tmpPath := tempDownloadPath(targetPath, s.runID)
 	f, err := os.Create(tmpPath)
 	if err != nil {
 		return err
@@ -61,6 +62,21 @@ func (s *Syncer) downloadItem(ctx context.Context, targetPath string, item Item,
 		_ = os.Chtimes(targetPath, mtime, mtime)
 	}
 	return nil
+}
+
+// tempDownloadPath returns the atomic-write scratch path for targetPath.
+// Its filename has a FIXED byte length regardless of targetPath's own
+// length — a hash of targetPath, not targetPath itself, is what makes the
+// name unique. The previous scheme (targetPath + ".tmp-" + runID) added 13+
+// bytes on TOP OF an already-255-byte-limited component, which meant a
+// target name already near the limit failed outright the moment a download
+// was attempted (finding L1). Hashing sidesteps the problem entirely: no
+// budget needs to be reserved for this suffix anymore (see
+// localpath.TruncateComponent's reserve=0 call sites).
+func tempDownloadPath(targetPath string, runID string) string {
+	sum := sha256.Sum256([]byte(targetPath))
+	name := "." + hex.EncodeToString(sum[:])[:8] + "-" + runID + ".tmp"
+	return filepath.Join(filepath.Dir(targetPath), name)
 }
 
 // evaluateLocal reads whatever local filesystem state ShouldDownload() needs

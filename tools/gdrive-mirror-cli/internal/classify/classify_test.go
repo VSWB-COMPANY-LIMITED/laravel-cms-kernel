@@ -163,6 +163,64 @@ func TestIsLocalFsError(t *testing.T) {
 	}
 }
 
+func TestIsInvalidLocalName(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{"go PathError ENAMETOOLONG", "open /some/very/long/path/name.docx: file name too long", true},
+		{"bare enametoolong token", "mkdir failed: ENAMETOOLONG", true},
+		{"go PathError EINVAL with abs path", "open /Volumes/WD-DATA1/foo: invalid argument", true},
+		{"bare invalid argument no path", "invalid argument", false},
+		{"safeJoin traversal rejection", `localpath.SafeJoin: path escapes root (root="/mnt/x" relPath="../../etc/passwd" resolved="/etc/passwd")`, true},
+		{"unrelated io error stays false", "mkdir(): Input/output error", false},
+		{"unrelated drive json stays false", `{"error":{"code":403,"message":"forbidden","errors":[{"reason":"insufficientFilePermissions"}]}}`, false},
+		{"empty string", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsInvalidLocalName(tc.msg); got != tc.want {
+				t.Errorf("IsInvalidLocalName(%q) = %v, want %v", tc.msg, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDriveError_InvalidLocalNameIsPermanent(t *testing.T) {
+	// Direction 1: DriveError must classify these as permanent/invalidLocalName.
+	cases := []string{
+		"open /some/very/long/path/name.docx: file name too long",
+		`localpath.SafeJoin: path escapes root (root="/mnt/x" relPath="../escape" resolved="/escape")`,
+	}
+	for _, msg := range cases {
+		got := DriveError(msg)
+		if got.Retryable {
+			t.Errorf("DriveError(%q).Retryable = true, want false (permanent)", msg)
+		}
+		if got.Reason != "invalidLocalName" {
+			t.Errorf("DriveError(%q).Reason = %q, want %q", msg, got.Reason, "invalidLocalName")
+		}
+	}
+}
+
+func TestIsLocalFsError_ExcludesInvalidLocalName(t *testing.T) {
+	// Direction 2: these same messages must NOT be counted as local-fs/disk
+	// errors — a badly-named Drive item is not evidence the disk is dying,
+	// and must never feed the consecutiveLocalFsErrors circuit breaker.
+	cases := []string{
+		"open /some/very/long/path/name.docx: file name too long",
+		"mkdir failed: ENAMETOOLONG",
+		"open /Volumes/WD-DATA1/foo: invalid argument",
+		`localpath.SafeJoin: path escapes root (root="/mnt/x" relPath="../escape" resolved="/escape")`,
+	}
+	for _, msg := range cases {
+		if IsLocalFsError(msg) {
+			t.Errorf("IsLocalFsError(%q) = true, want false (must be classified as invalidLocalName, not a disk error)", msg)
+		}
+	}
+}
+
 func TestShouldAbortOnLocalFsErrors(t *testing.T) {
 	cases := []struct {
 		consecutive int

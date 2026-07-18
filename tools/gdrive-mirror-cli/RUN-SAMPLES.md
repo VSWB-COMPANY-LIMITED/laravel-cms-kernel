@@ -439,3 +439,5 @@ nghĩa là retry cũng vô ích (vd Google Forms/Sites không export được, f
 | Chạy dừng giữa chừng sau nhiều lỗi | Circuit breaker cắt sau **20 lỗi I/O local liên tiếp** — ổ đĩa có vấn đề, không phải lỗi mạng. |
 | Nhiều item `permanent` | Loại file Google không export được (Forms/Sites/Maps/Jamboard) hoặc vượt hạn mức export — xem cột `error_reason` trong CSV. |
 | Chạy lại tải lại từ đầu | Đang bật `--force`. Bỏ flag đó đi để dùng delta-sync. |
+| Tên file/folder local khác tên trên Drive (có `_` thay ký tự lạ, hoặc có đuôi `_<8 ký tự ID>` trước phần mở rộng) | Bình thường — tool sanitize tên trên MỌI OS (không chỉ Windows) để mirror di động được giữa Mac/Windows, và tự đổi tên khi 2 item trùng tên (kể cả trùng chỉ khác hoa/thường, hoặc 1 file trùng tên 1 folder). Xem log dòng `WARN: Trùng tên...` và cột `Collisions` ở cuối run. |
+| Tên rất dài bị cắt ngắn, có thêm `~xxxxxx` trước phần mở rộng | Bình thường — giới hạn 255 byte/thành-phần-tên (NTFS). Hash 6 ký tự đảm bảo 2 tên dài khác nhau không bị gộp làm một sau khi cắt. |

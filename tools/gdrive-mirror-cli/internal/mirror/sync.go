@@ -20,6 +20,7 @@ import (
 	"google.golang.org/api/option"
 
 	"github.com/vswb/gdrive-mirror/internal/classify"
+	"github.com/vswb/gdrive-mirror/internal/localpath"
 	"github.com/vswb/gdrive-mirror/internal/report"
 )
 
@@ -87,7 +88,11 @@ func (s *Syncer) Run(ctx context.Context) (Stats, error) {
 		}
 	}
 
-	localPrefix := s.resolveFolderName(ctx)
+	// The synced folder's own name comes straight from Drive and needs the
+	// same sanitize+truncate treatment as every other path component (§C1-3/
+	// L1-3) — it becomes the top-level directory every downloaded item lands
+	// under, so leaving it unsanitized would defeat the point.
+	localPrefix := localpath.TruncateComponent(localpath.SanitizeComponent(s.resolveFolderName(ctx)), 0)
 
 	s.logf("Fetching remote item list (recursive) via Drive API...")
 	items, err := s.ListFolderRecursive(ctx, s.cfg.FolderID, "")
@@ -136,17 +141,31 @@ func (s *Syncer) resolveFolderName(ctx context.Context) string {
 	return f.Name
 }
 
-// buildPlan walks items in listing order, sequentially (mkdir is cheap and
-// this keeps collision-suffix assignment deterministic), creating
-// directories and resolving each file's final target path — including
-// shortcut skipping and same-name collision suffixing. Actual network
-// downloads happen later in runWorkers so they can run concurrently.
+// buildPlan walks items in listing order, sequentially (mkdir is cheap),
+// creating directories and resolving each file's final target path —
+// including shortcut skipping. Actual network downloads happen later in
+// runWorkers so they can run concurrently.
+//
+// Name collision resolution (sanitize/truncate/dedup) now happens up front
+// at listing time (see list.go resolveSiblingNames) — it.Path arrives here
+// already safe and unique among its siblings. The `used` map below is
+// defense-in-depth only, in case something upstream missed a case; it must
+// never silently overwrite (that was the original C1/C2/C3 bug), so a hit
+// here is logged loudly and failed instead.
 func (s *Syncer) buildPlan(items []Item, localPrefix string) []fileTask {
-	used := map[string]string{} // resolved target path -> Drive file ID (collision tracking, this run only)
+	used := map[string]string{} // resolved target path -> Drive file ID
 	var tasks []fileTask
 
 	for _, it := range items {
-		absPath := filepath.Join(s.cfg.Path, localPrefix, filepath.FromSlash(it.Path))
+		absPath, pathErr := localpath.SafeJoin(s.cfg.Path, filepath.Join(localPrefix, filepath.FromSlash(it.Path)))
+		if pathErr != nil {
+			// A crafted/malformed Drive name escaping --path is a permanent,
+			// non-filesystem-health problem — it must never count toward the
+			// local-fs circuit breaker (that breaker exists to detect a dying
+			// disk, not a hostile/malformed remote name).
+			s.recordPathFailure(it, pathErr)
+			continue
+		}
 
 		if it.Type == "dir" {
 			if err := os.MkdirAll(absPath, 0o755); err != nil {
@@ -183,36 +202,16 @@ func (s *Syncer) buildPlan(items []Item, localPrefix string) []fileTask {
 			exportSpec = &specCopy
 		}
 
-		target := absPath
-		if exportSpec != nil {
-			target = absPath + "." + exportSpec.Ext
+		if prevID, exists := used[absPath]; exists && prevID != it.ID {
+			s.recordUnexpectedCollision(it, prevID, absPath)
+			continue
 		}
+		used[absPath] = it.ID
 
-		if prevID, exists := used[target]; exists && prevID != it.ID {
-			s.mu.Lock()
-			s.stats.Collisions++
-			s.mu.Unlock()
-			target = collisionSuffix(target, it.ID)
-		}
-		used[target] = it.ID
-
-		tasks = append(tasks, fileTask{item: it, targetPath: target, exportSpec: exportSpec})
+		tasks = append(tasks, fileTask{item: it, targetPath: absPath, exportSpec: exportSpec})
 	}
 
 	return tasks
-}
-
-// collisionSuffix appends the first 8 chars of the Drive file ID before the
-// extension, e.g. "file.pdf" → "file_1JP7CIBW.pdf" — matches
-// GDriveMirrorSync's collision handling 1:1.
-func collisionSuffix(target string, fileID string) string {
-	ext := filepath.Ext(target)
-	base := strings.TrimSuffix(target, ext)
-	suffix := fileID
-	if len(suffix) > 8 {
-		suffix = suffix[:8]
-	}
-	return base + "_" + suffix + ext
 }
 
 func (s *Syncer) recordDirFailure(it Item, err error) {
@@ -230,6 +229,49 @@ func (s *Syncer) recordDirFailure(it Item, err error) {
 	})
 	s.mu.Unlock()
 	s.logError("Failed to create folder: %s | reason: %s", it.Path, msg)
+}
+
+// recordPathFailure records a localpath.SafeJoin rejection (traversal
+// attempt / escaping --path). Always permanent — retrying can't fix a
+// structurally malformed name — and deliberately does NOT touch
+// consecutiveLocalFsErrors: this is a Drive-side data problem, not evidence
+// the destination disk is failing, so it must never contribute to the
+// local-fs circuit breaker.
+func (s *Syncer) recordPathFailure(it Item, err error) {
+	s.mu.Lock()
+	s.stats.Errors++
+	s.stats.FailedFiles = append(s.stats.FailedFiles, report.FailedItem{
+		Type:      it.Type,
+		Path:      it.Path,
+		ID:        optStr(it.ID),
+		MimeType:  optStr(it.MimeType),
+		Reason:    err.Error(),
+		Permanent: true,
+		Category:  "Local path rejected",
+	})
+	s.mu.Unlock()
+	s.logError("Rejected local path for %s (id=%s): %v", it.Path, it.ID, err)
+}
+
+// recordUnexpectedCollision fires only if two items still resolve to the
+// same absPath after list.go's resolveSiblingNames has already deduped
+// every folder's direct children — i.e. a bug upstream, not a normal Drive
+// occurrence. Logged loudly and failed rather than silently overwritten,
+// same principle as every other failure path in this package.
+func (s *Syncer) recordUnexpectedCollision(it Item, prevID string, absPath string) {
+	s.mu.Lock()
+	s.stats.Errors++
+	s.stats.FailedFiles = append(s.stats.FailedFiles, report.FailedItem{
+		Type:      "file",
+		Path:      it.Path,
+		ID:        optStr(it.ID),
+		MimeType:  optStr(it.MimeType),
+		Reason:    fmt.Sprintf("local path already used by another item (id=%s) — listing-time dedup should have prevented this", prevID),
+		Permanent: true,
+		Category:  "Local name collision (unexpected)",
+	})
+	s.mu.Unlock()
+	s.logError("UNEXPECTED collision at plan time (listing dedup should have prevented this): %s already claimed by id=%s, skipping id=%s", absPath, prevID, it.ID)
 }
 
 // runWorkers dispatches tasks to a fixed-size goroutine pool. The circuit

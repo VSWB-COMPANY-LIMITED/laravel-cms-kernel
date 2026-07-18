@@ -76,6 +76,14 @@ var transientReasons = map[string]string{
 // Google\Service\Exception::getMessage() in the PHP client), or a plain
 // string for non-API errors (network/curl-equivalent, filesystem).
 func DriveError(msg string) Result {
+	if IsInvalidLocalName(msg) {
+		// Checked before anything else: a garbage/oversized/traversal-attempt
+		// NAME is a permanent, Drive-side data problem — must never be
+		// misread as a Drive API failure (retried) or a disk-health failure
+		// (fed to the local-fs circuit breaker). See IsInvalidLocalName doc.
+		return Result{Category: "Invalid or too-long local name", Retryable: false, Reason: "invalidLocalName"}
+	}
+
 	var body driveErrorBody
 	var reason string
 	var code int
@@ -135,6 +143,55 @@ func DriveError(msg string) Result {
 	return Result{Category: "Other", Retryable: true}
 }
 
+// invalidNameMarkers catch OS errors about a NAME itself being malformed —
+// too long (ENAMETOOLONG) or otherwise rejected by the OS — as distinct from
+// a disk-health problem. This distinction matters: a single Drive item with
+// a garbage/oversized name must never be able to trip the local-fs circuit
+// breaker and abort an otherwise-healthy run. Before this tool sanitized/
+// truncated every name unconditionally (localpath package), a "dirty" Drive
+// name could reach the OS raw and get misclassified as evidence the
+// destination disk itself was failing.
+var invalidNameMarkers = []string{
+	"file name too long", // ENAMETOOLONG.Error() on macOS/Linux
+	"name too long",
+	"enametoolong",
+}
+
+// safeJoinMarker recognizes localpath.SafeJoin's own traversal-rejection
+// error text (see localpath.SafeJoin) — a Drive item name containing "/" or
+// ".." that would otherwise escape --path gets the same "permanent, not a
+// disk problem" treatment as an invalid/too-long name.
+const safeJoinMarker = "localpath.safejoin"
+
+// IsInvalidLocalName reports whether msg describes a Drive item whose NAME
+// itself is unusable locally (too long, structurally invalid/EINVAL, or a
+// rejected path-traversal attempt) — always permanent, and never treated as
+// evidence of a failing local disk (mirrors the asymmetric-risk reasoning in
+// IsLocalFsError's doc: this classification exists so ONE badly-named Drive
+// item can never abort the whole run and get blamed on the hardware).
+func IsInvalidLocalName(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	m := strings.ToLower(msg)
+
+	if strings.Contains(m, safeJoinMarker) {
+		return true
+	}
+	for _, marker := range invalidNameMarkers {
+		if strings.Contains(m, marker) {
+			return true
+		}
+	}
+	// Bare EINVAL ("invalid argument") is too generic to trust alone — only
+	// counts when paired with an absolute path, same guard IsLocalFsError
+	// applies to its bare "permission denied" check below.
+	if strings.Contains(m, "invalid argument") && absPathAfterMarker.MatchString(msg) {
+		return true
+	}
+	return false
+}
+
 var hardFsMarkers = []string{
 	"input/output error",
 	"errno=5",
@@ -161,6 +218,13 @@ var absPathAfterMarker = regexp.MustCompile(`(?:^|[\s(:])/[\w./\-]+`)
 // (mild) — so when unsure, this always leans toward false.
 func IsLocalFsError(msg string) bool {
 	if msg == "" {
+		return false
+	}
+	if IsInvalidLocalName(msg) {
+		// Explicit guard (belt-and-suspenders): a malformed/too-long NAME is
+		// never disk-health evidence, so it must never feed the local-fs
+		// circuit breaker — even if hardFsMarkers/fsFunctionMarkers below is
+		// later extended in a way that would otherwise overlap.
 		return false
 	}
 	m := strings.ToLower(msg)
