@@ -141,6 +141,21 @@ By default (without `--force`), the script performs a **Delta Sync**:
 2. If they match the Google Drive version exactly, it **Skips** the file.
 3. This is extremely fast for large libraries (thousands of files) and resumes after a network drop.
 
+### Atomic, Crash-Safe Writes
+Every downloaded file (regular files, and Google Native exports converted to Office formats) is
+written to a temp file next to the destination first, then moved into place with `rename()` —
+**only after the download finishes with no errors**. A crash, dropped connection, or unplugged
+drive mid-transfer leaves at most an orphaned temp file; the real destination path is always
+either the old complete file or the new complete file, never a truncated one.
+- The temp filename has a **fixed length** and is derived from a hash of the destination path
+  (not the destination name itself), so it never eats into the 255-byte-per-component budget
+  that name-safety truncation (above) already has to manage.
+- Any leftover temp file from a previous crashed/killed run is swept and removed automatically
+  at the start of the next run — only files matching the tool's own temp-name pattern **and**
+  older than a safety threshold are touched, so a temp file still being written by a concurrent
+  run is never deleted out from under it.
+- (Same write-then-rename approach as the standalone Go CLI at `tools/gdrive-mirror-cli/`.)
+
 ### Google Native Export
 Google Docs/Sheets/Slides are automatically converted to Office formats:
 - **Google Sheets** $\rightarrow$ `.xlsx`

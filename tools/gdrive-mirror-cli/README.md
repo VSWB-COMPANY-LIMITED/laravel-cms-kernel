@@ -122,7 +122,7 @@ Scheduler), and troubleshooting: **[RUN-SAMPLES.md](RUN-SAMPLES.md)**.
 
 ## Reports
 
-When any item fails, two reports are written to
+When any item fails, reports are written to
 `<path>/../gdrive-mirror-reports/`:
 
 - `failed-<folderTag>-<YYYYMMDD-HHMMSS>.json` — full detail per item
@@ -133,6 +133,18 @@ When any item fails, two reports are written to
   `,` gets misread as a decimal separator under VN locale Excel), columns
   `file;path;size;category;error_reason;permanent;drive_link`, sorted
   permanent-first then by category then by size descending.
+- `<ddmmYYYY_HHMMSS>.xlsx` — same columns/sort order as the CSV above, as
+  a real `.xlsx` (built with only the Go standard library — `archive/zip` +
+  `encoding/xml` — no OpenSpout/PhpSpreadsheet-equivalent dependency).
+  Only the 10 most recent are kept (older ones auto-pruned), same as the
+  JSON report.
+- `unexportable/<folderTag>.md` — Markdown manifest of every **permanent**
+  (non-retryable) failure for that folder, grouped by error reason, each
+  item with a human-readable size and a manual-download link (Google-native
+  files link to their web editor; regular files link to the generic Drive
+  file view). Unlike the reports above, this file is **always overwritten**
+  and reflects the folder's *current* state rather than one run's history —
+  it's deleted automatically once the folder has no more permanent failures.
 
 ## Upgrading an existing mirror (one-time, read this first)
 
@@ -151,10 +163,6 @@ one-way-never-delete is the safety property this tool is built around.
 
 ## Known gaps vs. the PHP source (deferred, not in this MVP)
 
-- `.xlsx` failed-report (CSV only — OpenSpout/PhpSpreadsheet dependency
-  not ported)
-- Unexportable manifest (`unexportable/<folderTag>.md`) with manual
-  download links grouped by reason
 - Listing item-count shrink guard (`shouldAbortOnShrink` logic exists and
   is unit-tested in `internal/classify`, but nothing persists prior-run
   state yet to call it from)
@@ -172,5 +180,5 @@ main.go                       CLI flag parsing + orchestration entrypoint
 internal/classify/            Pure error-classification helpers (unit tested)
 internal/localpath/           Pure name-sanitize/truncate/safe-join helpers (unit tested)
 internal/mirror/              List/delta/download/retry/circuit-breaker/worker-pool
-internal/report/              Failed-item JSON + Excel-safe CSV report writers
+internal/report/              Failed-item JSON/CSV/XLSX report writers + unexportable manifest
 ```

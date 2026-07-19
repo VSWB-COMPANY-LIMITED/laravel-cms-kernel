@@ -141,23 +141,41 @@ func PruneOldFailedReports(dir string, keep int) (deleted int, err error) {
 	return deleted, nil
 }
 
-// buildManualDownloadURL mirrors GDriveMirrorSync::buildManualDownloadUrl():
-// Google-native files get a Docs Editors URL (still openable/downloadable by
-// a human even when the export API itself refuses); anything else gets the
-// generic Drive file URL.
-func buildManualDownloadURL(id string, mimeType string) string {
+// manualDownloadURL mirrors GDriveMirrorSync::buildManualDownloadUrl()
+// (PHP source ~L2750): a Google-native item (Docs/Sheets/Slides/Drawings)
+// gets its native web-editor URL — still openable/downloadable by a human
+// even when the export API itself refuses — anything else gets the generic
+// Drive file URL. ext is the suggested extension for a manual download
+// (native types convert to their Office equivalent on manual export;
+// regular files keep whatever extension their own path already has). The
+// single source of truth for both buildManualDownloadURL (CSV/XLSX
+// drive_link column, url only) and BuildUnexportableManifest (manifest.go,
+// needs url+ext) — kept in one place so the two reports can't drift apart
+// on which mimeType maps to which URL.
+func manualDownloadURL(id string, mimeType string, path string) (url string, ext string) {
 	switch mimeType {
 	case "application/vnd.google-apps.presentation":
-		return "https://docs.google.com/presentation/d/" + id
+		return "https://docs.google.com/presentation/d/" + id, "pptx"
 	case "application/vnd.google-apps.document":
-		return "https://docs.google.com/document/d/" + id
+		return "https://docs.google.com/document/d/" + id, "docx"
 	case "application/vnd.google-apps.spreadsheet":
-		return "https://docs.google.com/spreadsheets/d/" + id
+		return "https://docs.google.com/spreadsheets/d/" + id, "xlsx"
 	case "application/vnd.google-apps.drawing":
-		return "https://docs.google.com/drawings/d/" + id
+		return "https://docs.google.com/drawings/d/" + id, "png"
 	default:
-		return "https://drive.google.com/file/d/" + id
+		fileExt := strings.TrimPrefix(filepath.Ext(path), ".")
+		if fileExt == "" {
+			fileExt = "file"
+		}
+		return "https://drive.google.com/file/d/" + id, fileExt
 	}
+}
+
+// buildManualDownloadURL is the CSV/XLSX drive_link column's URL-only view
+// of manualDownloadURL (no path/extension needed there).
+func buildManualDownloadURL(id string, mimeType string) string {
+	url, _ := manualDownloadURL(id, mimeType, "")
+	return url
 }
 
 // FailedRowColumns is the fixed CSV column order — stable across runs so

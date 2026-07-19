@@ -393,6 +393,23 @@ func (s *Syncer) writeReports(reportDir string) {
 	failed := append([]report.FailedItem(nil), s.stats.FailedFiles...)
 	s.mu.Unlock()
 
+	// Unexportable manifest is evaluated UNCONDITIONALLY, even when failed
+	// is empty this run — a folder that had permanent failures before but
+	// is now clean must have its stale manifest deleted (see
+	// WriteUnexportableManifest doc), so this can't sit behind the
+	// len(failed)==0 early-return below like the other three reports.
+	meta := report.ManifestMeta{
+		GeneratedAt:   time.Now().Format(time.RFC3339),
+		RunID:         s.runID,
+		FolderIDs:     []string{s.cfg.FolderID},
+		BaseLocalPath: s.cfg.Path,
+	}
+	if manifestPath, err := report.WriteUnexportableManifest(reportDir, failed, meta); err != nil {
+		s.logWarn("Could not write unexportable manifest: %v", err)
+	} else if manifestPath != "" {
+		s.logf("File KHÔNG THỂ mirror (permanent) — chi tiết + link tải tay: %s", manifestPath)
+	}
+
 	if len(failed) == 0 {
 		return
 	}
@@ -412,6 +429,16 @@ func (s *Syncer) writeReports(reportDir string) {
 		s.logWarn("Could not write failed CSV: %v", err)
 	} else if csvPath != "" {
 		s.logf("Bảng file lỗi (CSV): %s", csvPath)
+	}
+
+	xlsxPath, err := report.WriteFailedXLSX(reportDir, failed)
+	if err != nil {
+		s.logWarn("Could not write failed XLSX: %v", err)
+	} else if xlsxPath != "" {
+		s.logf("Bảng file lỗi (XLSX): %s", xlsxPath)
+		if _, pruneErr := report.PruneOldFailedXLSX(reportDir, 10); pruneErr != nil {
+			s.logWarn("Could not prune old failed XLSX reports: %v", pruneErr)
+		}
 	}
 }
 

@@ -3,6 +3,28 @@
 ## [Unreleased]
 
 ### Fixed
+- **[GDriveMirrorSync] Ghi file ATOMIC (write-then-rename) — bản PHP từng kém an toàn hơn bản
+  Go.** Trước đây PHP ghi THẲNG vào file đích (`streamDownloadViaApi()`, nhánh export Google
+  Native `File::put()`, nhánh stream thường `fopen('w')`) — crash/mất mạng/rút ổ giữa chừng để
+  lộ 1 file CỤT ngay tại path thật cho tới lần sync kế tiếp mới tự chữa (self-heal qua delta
+  check), trong khoảng đó người dùng thấy 1 file trông như thật nhưng hỏng. Bản Go
+  (`tools/gdrive-mirror-cli/internal/mirror/download.go::downloadItem`/`tempDownloadPath`) đã
+  ghi ra file tạm rồi `rename()` nên không bao giờ lộ file cụt.
+  - Thêm `atomicTempPath()` (static, pure): tên file tạm ĐỘ DÀI CỐ ĐỊNH dạng
+    `.<8 hex hash targetPath>-<8 hex runId>.tmp`, cùng thư mục với đích, KHÔNG nối vào tên đích
+    (tránh cộng byte lên tên component có thể đã sát trần 255 byte — mirror finding L1 bản Go).
+  - Thêm `atomicPutContents()` (export Google Native) và `atomicWriteStream()`
+    (`streamDownloadViaApi()` + nhánh stream thường): ghi ra file tạm, `rename()` vào đích CHỈ
+    KHI thành công trọn vẹn; lỗi bất kỳ lúc nào → xoá file tạm, KHÔNG đụng file đích cũ. Lỗi
+    mở/ghi/rename vẫn phân loại/đếm circuit-breaker ĐÚNG như trước (message vẫn chứa tên hàm PHP
+    gốc, đã có sẵn trong `isLocalFsError()`'s `fsFunctionMarkers`).
+  - Thêm `isOwnAtomicTempFilename()` (static, pure) + `cleanupStaleAtomicTempFiles()`: dọn file
+    tạm mồ côi sót lại từ 1 run bị crash/kill giữa chừng, chạy ở đầu mỗi run (sau preflight write
+    probe). Chỉ xoá file khớp ĐÚNG mẫu tên VÀ cũ hơn 6 giờ (`STALE_ATOMIC_TMP_AGE_SECONDS`) —
+    tránh xoá nhầm file tạm của 1 run song song đang tải file lớn, và tuyệt đối không đụng file
+    nào khác của người dùng (nguyên tắc "KHÔNG xoá file local" của tool).
+  - Test mới: `tests/Unit/GDriveAtomicWriteTest.php` (18 test — độ dài cố định bất kể tên đích
+    dài bao nhiêu, cùng thư mục với đích, và mẫu nhận diện file-tạm không khớp nhầm file thường).
 - **[GDriveMirrorSync + gdrive-mirror-cli] Hậu tố chống trùng: ID ngắn và bộ đếm dự phòng.**
   Bắt được khi review port PHP (2026-07-19) — khiếm khuyết có ở CẢ hai bản, đã sửa đồng bộ:
   - vòng dò hậu tố bắt đầu ở `8` cứng nên ID Drive ngắn hơn 8 ký tự làm nhánh ID không chạy lần

@@ -129,15 +129,36 @@
  *            mtime(local) <  mtime(remote)               → tải lại (đè) — Drive mới hơn.
  *        Sau khi tải thành công: touch(local) = mtime(remote) để lần sau so chính xác.
  *
- *     3) Cơ chế ghi đè (KHÔNG duplicate, KHÔNG backup):
- *        • Google Native: File::put() → ghi đè toàn bộ.
- *        • Regular file:  fopen('w')  → truncate về 0 byte rồi stream nội dung mới.
- *        • Permission/owner của file local KHÔNG bị đổi (chỉ truncate nội dung).
- *        • KHÔNG tạo file .bak / .old / .tmp — đè trực tiếp tại path cũ.
+ *     3) Cơ chế ghi đè — ATOMIC write-then-rename (đổi 2026-07-19, khớp bản Go):
+ *        • MỌI đường ghi nội dung (Google Native export, regular file stream, service-account
+ *          API stream — xem atomicPutContents()/atomicWriteStream()) đều ghi ra 1 file TẠM
+ *          trong CÙNG THƯ MỤC với file đích trước, rồi rename() đè vào path thật CHỈ KHI tải
+ *          xong TRỌN VẸN không lỗi.
+ *        • Tên file tạm có ĐỘ DÀI CỐ ĐỊNH, KHÔNG nối vào tên đích — dạng
+ *          ".<8 hex đầu sha256(targetPath)>-<8 hex run id>.tmp" (xem atomicTempPath()). Không
+ *          ăn vào ngân sách 255 byte/component mà truncateNameComponent() quản lý cho tên đích
+ *          (khác lược đồ cũ kiểu "tên.tmp-runId" từng làm được — mirror đúng finding L1 bản Go).
+ *        • Lỗi bất kỳ lúc nào giữa chừng (mở file tạm / ghi / rename) → file tạm bị xoá ngay,
+ *          file ĐÍCH CŨ giữ nguyên KHÔNG bị đụng tới.
+ *        • VÌ SAO ĐỔI khỏi "ghi thẳng, KHÔNG tạo .bak/.tmp" (hành vi cũ): ghi thẳng khiến
+ *          crash/mất mạng/rút ổ giữa chừng để lộ NGAY 1 file CỤT tại path thật cho tới lần sync
+ *          kế tiếp mới tự chữa (self-heal, xem mục 4) — trong lúc đó người dùng thấy 1 file
+ *          trông như file thật nhưng hỏng. Atomic write-then-rename loại bỏ hẳn khoảng hở này:
+ *          path thật LUÔN LÀ hoặc bản CŨ đầy đủ, hoặc bản MỚI đầy đủ, không bao giờ dở dang.
+ *        • File tạm sót lại từ 1 run bị crash/kill giữa chừng được quét dọn tự động ở đầu run
+ *          kế tiếp — CHỈ file khớp đúng mẫu tên tạm ở trên VÀ đủ cũ (xem
+ *          cleanupStaleAtomicTempFiles()); KHÔNG BAO GIỜ đụng file nào khác của người dùng.
+ *        • Permission/owner của file local: file MỚI (sau rename) mang permission mặc định lúc
+ *          tạo file tạm — khác hành vi truncate-in-place cũ (giữ nguyên inode/permission cũ).
+ *          Đánh đổi chấp nhận được để có atomic write; bản Go có cùng đánh đổi này.
  *
- *     4) An toàn khi crash giữa chừng:
- *        Ghi KHÔNG atomic. Crash giữa stream → file local còn lại partial. Lần sync
- *        kế tiếp: size/MD5 mismatch sẽ được phát hiện → tải lại từ đầu. Self-heal.
+ *     4) An toàn khi crash giữa chừng (ATOMIC — xem mục 3):
+ *        Crash/mất mạng/rút ổ giữa chừng chỉ để lại 1 file TẠM (.tmp) cạnh file đích — file đích
+ *        tại path thật KHÔNG BAO GIỜ bị lộ ở trạng thái dở dang (khác hẳn hành vi ghi-thẳng cũ).
+ *        File tạm mồ côi được tool tự dọn ở đầu lần chạy kế tiếp (cleanupStaleAtomicTempFiles()).
+ *        Nếu file đích trước đó CHƯA từng tồn tại (lần tải đầu) → đơn giản không có file nào ở
+ *        path đó cho tới khi 1 lần chạy thành công trọn vẹn. Self-heal vẫn đúng như trước: lần
+ *        sync kế tiếp coi như chưa tải, tải lại từ đầu.
  *
  *     5) Các tình huống đặc biệt:
  *        • Local file người dùng đã sửa, Drive không đổi  → SKIP (giữ bản sửa).
@@ -484,6 +505,16 @@ class GDriveMirrorSync extends Command
     ];
 
     /**
+     * ── Atomic write constants (2026-07-19) ─────────────────────────────────────────────────
+     * Ngưỡng tuổi (giây) để coi 1 file tạm atomic-write (xem atomicTempPath()) là "rác sót lại
+     * từ 1 run TRƯỚC bị crash/kill giữa chừng" thay vì đang được 1 run KHÁC (đồng thời, cùng
+     * $baseLocalPath) ghi dở. 6 giờ đủ rộng so với thời gian tải THẬT của 1 file (kể cả file vài
+     * GB qua mạng chậm) — không xoá nhầm file tạm của 1 run song song còn đang chạy, nhưng vẫn
+     * dọn được rác trong thời gian hợp lý thay vì tích luỹ vô hạn qua nhiều lần chạy cron.
+     */
+    protected const STALE_ATOMIC_TMP_AGE_SECONDS = 6 * 3600;
+
+    /**
      * Helper to get setting from DB (fallback to ENV)
      */
     protected function getGdriveSetting($key, $envKey)
@@ -602,6 +633,12 @@ class GDriveMirrorSync extends Command
                     ]);
                     return Command::FAILURE;
                 }
+
+                // Dọn file tạm atomic-write (xem docblock đầu file mục 3/4) sót lại từ 1 run
+                // TRƯỚC bị crash/kill giữa chừng — chạy 1 lần ở đầu run, SAU khi đã xác nhận
+                // đích ghi được (writeProbe ở trên). Bỏ qua ở --dry-run (khối này vốn đã được
+                // bọc trong "if (! dry-run)") vì dry-run không ghi gì ra đích, kể cả dọn rác.
+                $this->cleanupStaleAtomicTempFiles($baseLocalPath);
             }
 
             $googleDisk = Storage::disk("google_drive_mirror");
@@ -1104,10 +1141,13 @@ class GDriveMirrorSync extends Command
                                 // throw), nhánh export này KHÔNG cần check status tay — lỗi (kể cả 403
                                 // fileNotDownloadable/cannotExportFile) đã throw đúng để withRetry() bắt được.
                                 $response = $service->files->export($fileId, $exportSpec['mime'], ['alt' => 'media']);
-                                File::put($targetLocalPath, $response->getBody()->getContents());
+                                // Ghi ATOMIC (xem docblock đầu file mục 3 + atomicPutContents()):
+                                // ra file tạm rồi rename() vào đích, chỉ khi thành công trọn vẹn.
+                                $this->atomicPutContents($targetLocalPath, $response->getBody()->getContents());
                             } elseif ($useApi) {
                                 // Service account: download via Drive API (masbug readStream
-                                // doesn't work when adapter root is a folder ID).
+                                // doesn't work when adapter root is a folder ID). Atomic write
+                                // được xử lý bên trong streamDownloadViaApi() qua atomicWriteStream().
                                 /** @var mixed $googleDisk */
                                 $service = $googleDisk->getAdapter()->getService();
                                 $this->streamDownloadViaApi($service, $fileId, $targetLocalPath);
@@ -1117,11 +1157,13 @@ class GDriveMirrorSync extends Command
                                 if (!$readStream) {
                                     throw new \Exception("Could not open read stream");
                                 }
-                                $writeStream = fopen($targetLocalPath, 'w');
                                 try {
-                                    stream_copy_to_stream($readStream, $writeStream);
+                                    // Ghi ATOMIC (xem atomicWriteStream()): stream vào file tạm,
+                                    // rename() vào đích chỉ khi copy xong không lỗi.
+                                    $this->atomicWriteStream($targetLocalPath, function ($handle) use ($readStream) {
+                                        stream_copy_to_stream($readStream, $handle);
+                                    });
                                 } finally {
-                                    fclose($writeStream);
                                     if (is_resource($readStream)) fclose($readStream);
                                 }
                             }
@@ -1997,9 +2039,10 @@ class GDriveMirrorSync extends Command
                     $name .= '.' . $exportSpec['ext'];
                 }
             }
-            // reserve=0: PHP ghi thẳng vào $targetLocalPath (KHÔNG qua file tạm — xem docblock đầu
-            // file mục 3 "KHÔNG tạo file .bak/.old/.tmp"), nên không cần chừa byte cho bất kỳ hậu tố
-            // tạm nào (khác bản Go, nơi tempDownloadPath() có tên tạm ĐỘ DÀI CỐ ĐỊNH riêng của nó).
+            // reserve=0: PHP giờ CŨNG ghi atomic qua file tạm rồi rename() (xem docblock đầu file
+            // mục 3 + atomicTempPath()), NHƯNG tên file tạm là HASH của $targetLocalPath (độ dài
+            // cố định), KHÔNG nối vào $name — giống hệt cách bản Go tránh vấn đề này ở
+            // tempDownloadPath() — nên vẫn không cần chừa byte cho bất kỳ hậu tố tạm nào ở đây.
             $name = self::truncateNameComponent($name, 0);
 
             $key = mb_strtolower($name);
@@ -2066,6 +2109,165 @@ class GDriveMirrorSync extends Command
     }
 
     /**
+     * ── Atomic write helpers (2026-07-19) ───────────────────────────────────────────────────
+     * Write-then-rename cho MỌI đường ghi nội dung file mirror — xem docblock đầu file mục 3/4.
+     * Port cùng tinh thần `tempDownloadPath()`/`downloadItem()` bản Go (tools/gdrive-mirror-cli/
+     * internal/mirror/download.go), khác ở chỗ PHP dùng callback cho phần "đổ nội dung" vì 2
+     * điểm gọi (streamDownloadViaApi() và nhánh stream_copy_to_stream() thường) có cách ghi
+     * khác nhau (fwrite theo chunk thủ công vs stream_copy_to_stream) nhưng cả hai cần chung 1
+     * cơ chế mở-file-tạm/rename/dọn-khi-lỗi — gom về đây để không lệch nhau giữa 2 chỗ.
+     */
+
+    /**
+     * Đường dẫn file tạm dùng cho ghi atomic — CÙNG THƯ MỤC với $targetLocalPath (để rename()
+     * luôn nằm trong cùng filesystem, không rơi vào lỗi EXDEV cross-device) nhưng tên có ĐỘ DÀI
+     * CỐ ĐỊNH, KHÔNG nối vào tên đích: dùng hash($targetLocalPath) để định danh duy nhất thay vì
+     * chính tên đích. Nối trực tiếp vào tên đích (vd cũ "$targetLocalPath . '.tmp-' . $runId")
+     * sẽ cộng thêm byte lên 1 tên component có thể đã sát trần 255 byte (xem
+     * truncateNameComponent()) — mirror đúng cách tempDownloadPath() bản Go tránh lỗi này
+     * (finding L1, xem download.go). $runId (không phải $this->runId) để hàm test được thuần —
+     * xem GDriveAtomicWriteTest.
+     */
+    public static function atomicTempPath(string $targetLocalPath, string $runId): string
+    {
+        $dir = dirname($targetLocalPath);
+        $name = '.' . substr(hash('sha256', $targetLocalPath), 0, 8) . '-' . $runId . '.tmp';
+
+        return rtrim($dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $name;
+    }
+
+    /**
+     * Nhận diện tên file có khớp ĐÚNG mẫu file tạm atomic-write của CHÍNH TOOL NÀY hay không
+     * (xem atomicTempPath()): '.' + 8 hex (hash rút gọn target path) + '-' + 8 hex (run id,
+     * xem `$this->runId = substr(uniqid(), -8)`) + '.tmp'. Dùng bởi cleanupStaleAtomicTempFiles()
+     * để quyết định file nào ĐƯỢC PHÉP xoá. Pure/static để unit test không cần I/O — xem
+     * GDriveAtomicWriteTest.
+     *
+     * Cố ý CHẶT (không dùng regex lỏng kiểu '.*\.tmp$'): tool này KHÔNG BAO GIỜ được xoá nhầm
+     * file của người dùng (nguyên tắc "KHÔNG xoá file local" ở docblock đầu file) — "abc.tmp"
+     * (thiếu dấu chấm dẫn đầu + hash/runId), ".hidden" (không khớp phần đuôi), hay
+     * ".12345678-abcdef01.tmp.pdf" (còn đuôi thật SAU .tmp) đều PHẢI bị từ chối.
+     */
+    public static function isOwnAtomicTempFilename(string $basename): bool
+    {
+        return preg_match('/^\.[0-9a-f]{8}-[0-9a-f]{8}\.tmp$/', $basename) === 1;
+    }
+
+    /**
+     * Ghi atomic phần content ĐÃ CÓ SẴN trong RAM (nhánh export Google Native — response body
+     * export() đã là 1 string đầy đủ, không stream theo chunk) — cùng cơ chế file tạm + rename
+     * với atomicWriteStream() bên dưới, chỉ khác cách đổ nội dung (File::put 1 lần).
+     */
+    protected function atomicPutContents(string $targetLocalPath, string $contents): void
+    {
+        File::ensureDirectoryExists(dirname($targetLocalPath));
+        $tmpPath = self::atomicTempPath($targetLocalPath, $this->runId);
+
+        try {
+            File::put($tmpPath, $contents);
+            rename($tmpPath, $targetLocalPath);
+        } catch (\Throwable $e) {
+            @unlink($tmpPath);
+            throw $e;
+        }
+    }
+
+    /**
+     * Ghi atomic theo stream: mở file tạm (xem atomicTempPath()), gọi $writer($handle) để đổ
+     * nội dung, rồi rename() vào đúng path đích CHỈ KHI $writer chạy xong KHÔNG lỗi. Lỗi bất kỳ
+     * lúc nào (mở file tạm / ghi / rename) → xoá file tạm, KHÔNG đụng file đích cũ (file cũ dù
+     * lệch còn hơn null — xem docblock đầu file mục 3/4).
+     *
+     * KHÔNG tự bắt lỗi mở/ghi/rename thành 1 loại riêng: để nguyên Throwable gốc (ErrorException
+     * từ fopen()/fwrite()/rename() thất bại) đi lên withRetry() — message vẫn chứa tên hàm PHP
+     * gốc ("fopen(", "fwrite(", "rename(" đều đã có sẵn trong fsFunctionMarkers của
+     * isLocalFsError()) nên vẫn được phân loại/đếm circuit-breaker ĐÚNG như lỗi ghi file hiện
+     * nay — không cần sửa gì ở classifyDriveError()/isLocalFsError().
+     */
+    protected function atomicWriteStream(string $targetLocalPath, callable $writer): void
+    {
+        File::ensureDirectoryExists(dirname($targetLocalPath));
+        $tmpPath = self::atomicTempPath($targetLocalPath, $this->runId);
+
+        try {
+            $handle = fopen($tmpPath, 'w');
+            try {
+                $writer($handle);
+            } finally {
+                fclose($handle);
+            }
+            rename($tmpPath, $targetLocalPath);
+        } catch (\Throwable $e) {
+            @unlink($tmpPath);
+            throw $e;
+        }
+    }
+
+    /**
+     * Dọn file tạm atomic-write (xem atomicTempPath()) SÓT LẠI từ 1 run TRƯỚC bị crash/kill
+     * giữa chừng — chạy 1 lần ở ĐẦU run (preflight, xem handle()), quét ĐỆ QUY trong
+     * $baseLocalPath của lần chạy này. CHỈ xoá file khớp ĐÚNG mẫu isOwnAtomicTempFilename() VÀ
+     * cũ hơn STALE_ATOMIC_TMP_AGE_SECONDS — ngưỡng đủ rộng để không xoá nhầm file tạm của 1 run
+     * KHÁC đang chạy song song trên cùng $baseLocalPath (xem docblock hằng số).
+     *
+     * 🔴 Vi phạm "KHÔNG xoá file local" (docblock đầu file) là lỗi nghiêm trọng nhất tool này có
+     * thể mắc — vì vậy: (1) match tên bằng regex CHẶT trước, KHÔNG suy đoán qua mtime/kích thước
+     * đơn thuần; (2) bỏ qua symlink (không theo link ra ngoài cây mirror); (3) mọi lỗi quét/xoá
+     * đều bị nuốt + log, KHÔNG fatal cả run — dọn rác thất bại thì để lại cho lần sau, không
+     * đáng để phá cả lần sync.
+     */
+    protected function cleanupStaleAtomicTempFiles(string $baseLocalPath): void
+    {
+        if (! is_dir($baseLocalPath)) {
+            return;
+        }
+
+        $now = time();
+        $removed = 0;
+
+        try {
+            $iterator = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($baseLocalPath, \FilesystemIterator::SKIP_DOTS),
+                \RecursiveIteratorIterator::SELF_FIRST
+            );
+            foreach ($iterator as $fileInfo) {
+                /** @var \SplFileInfo $fileInfo */
+                if ($fileInfo->isLink() || ! $fileInfo->isFile()) {
+                    continue;
+                }
+                if (! self::isOwnAtomicTempFilename($fileInfo->getFilename())) {
+                    continue;
+                }
+                $mtime = @filemtime($fileInfo->getPathname());
+                if ($mtime === false || ($now - $mtime) < self::STALE_ATOMIC_TMP_AGE_SECONDS) {
+                    continue;
+                }
+                if (@unlink($fileInfo->getPathname())) {
+                    $removed++;
+                }
+            }
+        } catch (\Throwable $e) {
+            // Quét thư mục lỗi (permission/I-O chập chờn trên ổ ngoài) KHÔNG được làm fatal cả
+            // run chỉ vì dọn rác thất bại — bỏ qua, để lại cho lần chạy sau.
+            Log::channel($this->log_channel)->warning("GDrive Sync: stale atomic temp cleanup scan error", [
+                'run_id' => $this->runId,
+                'base_local_path' => $baseLocalPath,
+                'error' => $e->getMessage(),
+            ]);
+            return;
+        }
+
+        if ($removed > 0) {
+            Log::channel($this->log_channel)->info("GDrive Sync: cleaned up stale atomic temp files", [
+                'run_id' => $this->runId,
+                'base_local_path' => $baseLocalPath,
+                'removed' => $removed,
+                'age_threshold_seconds' => self::STALE_ATOMIC_TMP_AGE_SECONDS,
+            ]);
+        }
+    }
+
+    /**
      * Stream-download a regular (non Google-native) file via Drive API to disk.
      * Avoids loading the whole file into memory.
      */
@@ -2089,17 +2291,18 @@ class GDriveMirrorSync extends Command
             self::assertDownloadOk($status, substr((string) $response->getBody(), 0, 8192));
         }
 
-        // 🔴 fopen(..., 'w') TRUNCATE file về 0 byte ngay lập tức — CHỈ được mở SAU khi đã xác
-        // nhận status OK ở trên. Mở trước sẽ phá file local tốt sẵn có thành rỗng nếu request lỗi.
+        // 🔴 Ghi ATOMIC (xem atomicWriteStream() ở trên): file tạm chỉ được mở SAU khi đã xác
+        // nhận status OK ở trên, và file ĐÍCH hoàn toàn không bị đụng cho tới khi rename() thành
+        // công — khác hẳn `fopen($targetLocalPath, 'w')` cũ (TRUNCATE thẳng file đích, phá file
+        // tốt sẵn có thành rỗng nếu code chạy tới đây mà request lỗi — dù nhánh đó đã được chặn
+        // bởi status-check ở trên, atomic write vẫn triệt để hơn: không còn cách nào chạm tới
+        // file đích ngoài đường rename() sau khi ghi xong).
         $body = $response->getBody();
-        $writeStream = fopen($targetLocalPath, 'w');
-        try {
+        $this->atomicWriteStream($targetLocalPath, function ($handle) use ($body) {
             while (! $body->eof()) {
-                fwrite($writeStream, $body->read(8192));
+                fwrite($handle, $body->read(8192));
             }
-        } finally {
-            fclose($writeStream);
-        }
+        });
     }
 
     /**
