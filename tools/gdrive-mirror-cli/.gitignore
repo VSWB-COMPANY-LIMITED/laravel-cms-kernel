@@ -1,6 +1,9 @@
-# Build artifacts — regenerable via `go build` / cross-compile loop (xem README).
-/dist/
-*.exe
+# dist/ ĐƯỢC commit (user chốt 2026-07-20): binary 5 target build sẵn để chạy
+# ngay trên Windows/Linux/macOS không cần cài Go. Build lại bằng cross-compile
+# loop trong README (-trimpath -ldflags="-s -w"). KHÔNG ignore dist nữa.
+
+# Binary build lẻ tại chỗ (go build -o gdrive-mirror .) — vẫn ignore.
+/gdrive-mirror
 
 # Credentials — KHÔNG BAO GIỜ commit service-account JSON.
 google-service-account-credentials.json

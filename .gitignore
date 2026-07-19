@@ -2,6 +2,10 @@ __MACOSX
 node_modules
 dist
 dist-ssr
+# Ngoại lệ (user chốt 2026-07-20): binary build sẵn của gdrive-mirror-cli ĐƯỢC commit
+# để chạy ngay trên Windows/Linux/macOS không cần Go — pattern `dist` trên là của webpack.
+!tools/gdrive-mirror-cli/dist
+!tools/gdrive-mirror-cli/dist/**
 vendor
 log
 

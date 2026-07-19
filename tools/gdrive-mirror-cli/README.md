@@ -5,20 +5,34 @@ one-way (Drive → local, never deletes local files). Runs on macOS/Linux/
 Windows without PHP — a port of `Dev\Kernel\Commands\GDriveMirrorSync`
 (`GDriveMirrorSync.php`) in this kernel package.
 
-## Build
+## Prebuilt binaries (committed in `dist/` — no Go toolchain needed)
+
+| OS | File |
+| --- | --- |
+| Windows x64 | `dist/gdrive-mirror-windows-amd64.exe` |
+| Linux x64 (static, mọi distro) | `dist/gdrive-mirror-linux-amd64` |
+| Linux ARM64 (Pi/ARM server, static) | `dist/gdrive-mirror-linux-arm64` |
+| macOS Apple Silicon | `dist/gdrive-mirror-darwin-arm64` |
+| macOS Intel | `dist/gdrive-mirror-darwin-amd64` |
+
+Checksums: `dist/SHA256SUMS`. macOS/Linux cần `chmod +x` sau khi copy; macOS
+tải qua trình duyệt thì thêm `xattr -d com.apple.quarantine <file>`.
+
+## Build from source
 
 ```bash
 go build -o gdrive-mirror .
 ```
 
-Cross-compile:
+Cross-compile (đúng lệnh dùng để build `dist/`):
 
 ```bash
-for t in darwin/arm64 darwin/amd64 linux/amd64 windows/amd64; do
-  GOOS=${t%/*} GOARCH=${t#*/} out="dist/gdrive-mirror-${t%/*}-${t#*/}"
+for t in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64; do
+  out="dist/gdrive-mirror-${t%/*}-${t#*/}"
   [ "${t%/*}" = "windows" ] && out="${out}.exe"
-  GOOS=${t%/*} GOARCH=${t#*/} go build -o "$out" .
+  CGO_ENABLED=0 GOOS=${t%/*} GOARCH=${t#*/} go build -trimpath -ldflags="-s -w" -o "$out" .
 done
+(cd dist && shasum -a 256 gdrive-mirror-* > SHA256SUMS)
 ```
 
 ## Auth
