@@ -38,8 +38,12 @@ type Syncer struct {
 	consecutiveLocalFsErrors atomic.Int64
 	aborted                  atomic.Bool
 	listingRetryHits         atomic.Int64
-	processedCount           atomic.Int64
-	totalFileTasks           int
+	// localPrefix is the sanitized top-level dir every target sits under; it
+	// goes into the failed report so a later --retry-failed run rebuilds the
+	// exact same paths (see report.FailedReport.LocalPrefix).
+	localPrefix    string
+	processedCount atomic.Int64
+	totalFileTasks int
 }
 
 // fileTask is a planned download: the Drive item plus its fully resolved
@@ -72,20 +76,14 @@ func newRunID() string {
 	return hex.EncodeToString(b)
 }
 
-// Run executes one full mirror pass and returns the accumulated stats.
+// Run executes one full mirror pass (live Drive listing) and returns the
+// accumulated stats. For the --retry-failed re-run mode (no listing, items
+// loaded from a prior JSON report) see RunRetry.
 func (s *Syncer) Run(ctx context.Context) (Stats, error) {
 	started := time.Now()
 
-	if !s.cfg.DryRun {
-		if err := os.MkdirAll(s.cfg.Path, 0o755); err != nil {
-			return s.stats, fmt.Errorf("preflight: cannot create destination dir %s: %w", s.cfg.Path, err)
-		}
-		// A real write→read→delete probe catches a disk that reports writable
-		// bits but is actually wedged/read-only/dead — os.MkdirAll succeeding
-		// above is not proof the disk can really take writes (see WriteProbe doc).
-		if !WriteProbe(s.cfg.Path, s.runID) {
-			return s.stats, fmt.Errorf("preflight: destination not writable (read-only/I/O error/hung disk): %s", s.cfg.Path)
-		}
+	if err := s.preflight(); err != nil {
+		return s.stats, err
 	}
 
 	// The synced folder's own name comes straight from Drive and needs the
@@ -102,6 +100,108 @@ func (s *Syncer) Run(ctx context.Context) (Stats, error) {
 	s.stats.TotalListed = len(items)
 	s.logf("Found %d item(s).", len(items))
 
+	folderIDs := []string{s.cfg.FolderID}
+
+	// BUG A-3 (PHP source) — last-resort safety net: compare this folder's
+	// item count against the previous run's, independent of WHY it might
+	// have shrunk (unlike the "verify on zero" retry in ListFolderRecursive,
+	// which only catches the ONE known cause — Drive returning an empty
+	// page under load). Placed BEFORE --limit/--dry-run below, same as the
+	// PHP source: --limit deliberately truncates the list for testing and
+	// must never be misread as "the tree really shrank", and --dry-run must
+	// never write state from a throwaway listing.
+	if aborted := s.applyShrinkGuard(len(items)); aborted {
+		reportDir := s.reportDir()
+		s.writeReports(reportDir, folderIDs)
+		s.printSummary(time.Since(started))
+		return s.stats, nil
+	}
+
+	return s.runTasksAndReport(ctx, items, localPrefix, folderIDs, started)
+}
+
+// applyShrinkGuard compares currentCount against the previous run's stored
+// item count (internal/report state file) via classify.ShouldAbortOnShrink,
+// and records the abort on s.stats when it trips. Returns true when the
+// caller must skip downloading anything for this folder — the folder is
+// left untouched and its state is NOT overwritten, so a genuinely-bad
+// listing never poisons the baseline the NEXT run compares against.
+//
+// A no-op (always returns false, never reads/writes state) in --dry-run: a
+// dry run is just a debug listing, not a real sync, and must not influence
+// future shrink-guard decisions — mirrors GDriveMirrorSync::handle()'s
+// $isFullSync guard.
+func (s *Syncer) applyShrinkGuard(currentCount int) bool {
+	if s.cfg.DryRun {
+		return false
+	}
+
+	folderTag := report.FolderTag([]string{s.cfg.FolderID})
+	stateDir := filepath.Join(s.reportDir(), "state")
+
+	var prevCount *int
+	if prev := report.ReadListingState(stateDir, folderTag); prev != nil {
+		pc := prev.ItemCount
+		prevCount = &pc
+	}
+
+	if !s.cfg.IgnoreShrink && classify.ShouldAbortOnShrink(prevCount, currentCount, classify.ListingShrinkAbortRatio) {
+		dropPct := 0.0
+		if prevCount != nil && *prevCount > 0 {
+			dropPct = (1 - float64(currentCount)/float64(*prevCount)) * 100
+		}
+		s.logError("ABORT folder %s: lần trước %d item, lần này %d item (giảm %.1f%%) — nghi liệt kê Drive bị cụt (mất quyền truy cập / lỗi API tạm thời), KHÔNG mirror đè lên cây có thể đang thiếu dữ liệu. Nếu bạn CHẮC CHẮN vừa tự xoá bớt file/folder trên Drive, chạy lại với --ignore-shrink.",
+			s.cfg.FolderID, prevCountOrZero(prevCount), currentCount, dropPct)
+		s.stats.Aborted = true
+		s.stats.AbortReason = "shrink-guard"
+		return true
+	}
+
+	if err := report.WriteListingState(stateDir, folderTag, s.cfg.FolderID, currentCount, s.runID); err != nil {
+		s.logWarn("Could not write listing state: %v", err)
+	}
+	return false
+}
+
+func prevCountOrZero(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// preflight verifies the destination directory can actually be written to,
+// before any listing/download work starts. A no-op in --dry-run (a dry run
+// never writes anything to --path).
+func (s *Syncer) preflight() error {
+	if s.cfg.DryRun {
+		return nil
+	}
+	if err := os.MkdirAll(s.cfg.Path, 0o755); err != nil {
+		return fmt.Errorf("preflight: cannot create destination dir %s: %w", s.cfg.Path, err)
+	}
+	// A real write→read→delete probe catches a disk that reports writable
+	// bits but is actually wedged/read-only/dead — os.MkdirAll succeeding
+	// above is not proof the disk can really take writes (see WriteProbe doc).
+	if !WriteProbe(s.cfg.Path, s.runID) {
+		return fmt.Errorf("preflight: destination not writable (read-only/I/O error/hung disk): %s", s.cfg.Path)
+	}
+	return nil
+}
+
+// reportDir is the shared parent for every report this package writes
+// (failed JSON/CSV/XLSX, unexportable manifest, listing state) — the
+// sibling "gdrive-mirror-reports" directory next to --path.
+func (s *Syncer) reportDir() string {
+	return filepath.Join(filepath.Dir(strings.TrimRight(s.cfg.Path, string(filepath.Separator))), "gdrive-mirror-reports")
+}
+
+// runTasksAndReport is the shared tail of Run() (live-listed items) and
+// RunRetry() (items loaded from a --retry-failed JSON): build the download
+// plan, execute it, write reports, print the summary. The two callers only
+// differ in how items/localPrefix were obtained, not in how they're
+// processed from here on.
+func (s *Syncer) runTasksAndReport(ctx context.Context, items []Item, localPrefix string, folderIDs []string, started time.Time) (Stats, error) {
 	if s.cfg.Limit > 0 && len(items) > s.cfg.Limit {
 		items = items[:s.cfg.Limit]
 		s.logf("--limit=%d: processing first %d item(s) only.", s.cfg.Limit, len(items))
@@ -112,6 +212,7 @@ func (s *Syncer) Run(ctx context.Context) (Stats, error) {
 		return s.stats, nil
 	}
 
+	s.localPrefix = localPrefix
 	tasks := s.buildPlan(items, localPrefix)
 	s.stats.Processed = len(items)
 
@@ -120,9 +221,13 @@ func (s *Syncer) Run(ctx context.Context) (Stats, error) {
 		s.logf("Starting synchronization of %d file(s) with concurrency=%d...", len(tasks), s.cfg.Concurrency)
 		s.runWorkers(ctx, tasks)
 	}
+	if s.aborted.Load() {
+		s.stats.Aborted = true
+		s.stats.AbortReason = "local-fs-circuit-breaker"
+	}
 
-	reportDir := filepath.Join(filepath.Dir(strings.TrimRight(s.cfg.Path, string(filepath.Separator))), "gdrive-mirror-reports")
-	s.writeReports(reportDir)
+	reportDir := s.reportDir()
+	s.writeReports(reportDir, folderIDs)
 	s.printSummary(time.Since(started))
 
 	return s.stats, nil
@@ -388,7 +493,10 @@ func optStr(v string) *string {
 	return &v
 }
 
-func (s *Syncer) writeReports(reportDir string) {
+// writeReports writes every end-of-run report, tagged under folderIDs (see
+// report.FolderTag) — the caller's single-element slice for a normal Run(),
+// or the retry JSON's own folder_ids for RunRetry().
+func (s *Syncer) writeReports(reportDir string, folderIDs []string) {
 	s.mu.Lock()
 	failed := append([]report.FailedItem(nil), s.stats.FailedFiles...)
 	s.mu.Unlock()
@@ -401,7 +509,7 @@ func (s *Syncer) writeReports(reportDir string) {
 	meta := report.ManifestMeta{
 		GeneratedAt:   time.Now().Format(time.RFC3339),
 		RunID:         s.runID,
-		FolderIDs:     []string{s.cfg.FolderID},
+		FolderIDs:     folderIDs,
 		BaseLocalPath: s.cfg.Path,
 	}
 	if manifestPath, err := report.WriteUnexportableManifest(reportDir, failed, meta); err != nil {
@@ -414,7 +522,7 @@ func (s *Syncer) writeReports(reportDir string) {
 		return
 	}
 
-	jsonPath, err := report.WriteFailedReportJSON(reportDir, failed, s.cfg.Path, []string{s.cfg.FolderID}, s.runID)
+	jsonPath, err := report.WriteFailedReportJSON(reportDir, failed, s.cfg.Path, s.localPrefix, folderIDs, s.runID)
 	if err != nil {
 		s.logWarn("Could not write failed report JSON: %v", err)
 	} else if jsonPath != "" {
@@ -484,6 +592,9 @@ func (s *Syncer) printSummary(duration time.Duration) {
 	fmt.Printf("Files Skipped:       %d\n", s.stats.Skipped)
 	fmt.Printf("Collisions:          %d\n", s.stats.Collisions)
 	fmt.Printf("Errors:              %d (permanent: %d, retryable: %d)\n", s.stats.Errors, permanentCount, retryableCount)
+	if s.stats.Aborted {
+		fmt.Printf("Aborted:             true (%s)\n", s.stats.AbortReason)
+	}
 	if n := s.listingRetryHits.Load(); n > 0 {
 		fmt.Printf("Listing trả 0 sai %d lần (đã tự verify + khắc phục) — Drive API không ổn định, mirror lần này vẫn đủ.\n", n)
 	}

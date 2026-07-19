@@ -51,14 +51,15 @@ type Item struct {
 
 // Config holds the resolved CLI options for one run.
 type Config struct {
-	FolderID    string
-	Path        string
-	CredsFile   string
-	Retry       int
-	Force       bool
-	DryRun      bool
-	Limit       int
-	Concurrency int
+	FolderID     string
+	Path         string
+	CredsFile    string
+	Retry        int
+	Force        bool
+	DryRun       bool
+	Limit        int
+	Concurrency  int
+	IgnoreShrink bool // skip the listing shrink-guard abort (see applyShrinkGuard) — PHP's --allow-shrink
 }
 
 // Stats accumulates the end-of-run summary — mutated under Syncer.mu.
@@ -71,4 +72,16 @@ type Stats struct {
 	Collisions  int
 	TotalListed int
 	FailedFiles []report.FailedItem
+
+	// Aborted is true when this Run()/RunRetry() call stopped early instead
+	// of completing a normal pass — either the shrink guard rejected a
+	// suspiciously small listing (AbortReason "shrink-guard") or the local
+	// filesystem circuit breaker tripped mid-download (AbortReason
+	// "local-fs-circuit-breaker"). Exposed on Stats (not just logged) so a
+	// multi-folder caller (main.go) can decide whether to keep processing
+	// the remaining folders — a shrink-guard abort is folder-specific and
+	// safe to move past, but a circuit-breaker abort means the destination
+	// disk itself is likely dead, so trying the next folder is pointless.
+	Aborted     bool
+	AbortReason string
 }

@@ -39,10 +39,18 @@ type FailedItem struct {
 
 // FailedReport is the top-level JSON payload written for --retry-failed.
 type FailedReport struct {
-	GeneratedAt    string       `json:"generated_at"`
-	RunID          string       `json:"run_id"`
-	FolderIDs      []string     `json:"folder_ids"`
-	BaseLocalPath  string       `json:"base_local_path"`
+	GeneratedAt   string   `json:"generated_at"`
+	RunID         string   `json:"run_id"`
+	FolderIDs     []string `json:"folder_ids"`
+	BaseLocalPath string   `json:"base_local_path"`
+	// LocalPrefix is the sanitized top-level directory name every item in
+	// this report was written under (the synced folder's own Drive name).
+	// FailedItem.Path is relative to it, NOT to BaseLocalPath — so a
+	// --retry-failed run that ignores this field rebuilds every target one
+	// directory too high and re-downloads into the wrong place (caught in
+	// review, 2026-07-19). Empty on reports written before this field
+	// existed; the retry path then re-resolves it from Drive.
+	LocalPrefix    string       `json:"local_prefix"`
 	Count          int          `json:"count"`
 	PermanentCount int          `json:"permanent_count"`
 	RetryableCount int          `json:"retryable_count"`
@@ -63,7 +71,7 @@ func FolderTag(folderIDs []string) string {
 // WriteFailedReportJSON writes the failed-items JSON report to dir
 // (created if missing) and returns its absolute path. Returns ("", nil) when
 // items is empty — matches writeFailedReport()'s "nothing to report" no-op.
-func WriteFailedReportJSON(dir string, items []FailedItem, baseLocalPath string, folderIDs []string, runID string) (string, error) {
+func WriteFailedReportJSON(dir string, items []FailedItem, baseLocalPath string, localPrefix string, folderIDs []string, runID string) (string, error) {
 	if len(items) == 0 {
 		return "", nil
 	}
@@ -83,6 +91,7 @@ func WriteFailedReportJSON(dir string, items []FailedItem, baseLocalPath string,
 		RunID:          runID,
 		FolderIDs:      folderIDs,
 		BaseLocalPath:  baseLocalPath,
+		LocalPrefix:    localPrefix,
 		Count:          len(items),
 		PermanentCount: permanentCount,
 		RetryableCount: len(items) - permanentCount,

@@ -165,6 +165,37 @@ Cron đơn giản — 2h sáng mỗi ngày (`crontab -e`):
 > ⚠️ macOS: tiến trình chạy từ cron cần được cấp **Full Disk Access** cho `/usr/sbin/cron`
 > (System Settings → Privacy & Security) mới ghi được vào ổ ngoài / thư mục bảo vệ.
 
+### 1.11 Chạy lại các item lỗi (`--retry-failed`)
+
+Sau 1 lần chạy có item lỗi, tool ghi report tại `<path>/../gdrive-mirror-reports/`
+(xem mục 4). Trỏ `--retry-failed` thẳng vào **thư mục report** để tool tự chọn file
+`failed-*.json` **mới nhất** — không cần tìm tên file thủ công:
+
+```bash
+./gdrive-mirror --retry-failed=/Volumes/WD-DATA1/gdrive-mirror-reports \
+  --path=/Volumes/WD-DATA1/GDrive-Mirror \
+  --creds=./creds.json \
+  --retry=10 --concurrency=4
+```
+
+Hoặc trỏ thẳng vào 1 file report cụ thể (vd muốn retry lại report của 1 lần chạy
+trước, không phải lần gần nhất):
+
+```bash
+./gdrive-mirror --retry-failed=/Volumes/WD-DATA1/gdrive-mirror-reports/failed-a1b2c3d4-20260719-020000.json \
+  --path=/Volumes/WD-DATA1/GDrive-Mirror --creds=./creds.json
+```
+
+Chế độ này **không liệt kê lại Drive** — chỉ tải đúng các item nằm trong report.
+Item `permanent: true` (không tự khỏi, vd file bị khoá/quá lớn để export) **mặc định
+bị bỏ qua**; muốn thử lại cả chúng thì thêm `--include-permanent`:
+
+```bash
+./gdrive-mirror --retry-failed=/Volumes/WD-DATA1/gdrive-mirror-reports \
+  --path=/Volumes/WD-DATA1/GDrive-Mirror --creds=./creds.json \
+  --include-permanent
+```
+
 ---
 
 ## 2. Linux
@@ -271,6 +302,32 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now gdrive-mirror.timer
 systemctl list-timers gdrive-mirror.timer
 journalctl -u gdrive-mirror.service -f
+```
+
+### 2.9 Chạy lại các item lỗi (`--retry-failed`)
+
+Trỏ thẳng vào thư mục report — tool tự chọn file `failed-*.json` mới nhất:
+
+```bash
+gdrive-mirror --retry-failed=/mnt/backup/gdrive-mirror-reports \
+  --path=/mnt/backup/gdrive \
+  --creds=/etc/gdrive/creds.json \
+  --retry=10 --concurrency=4
+```
+
+Trỏ thẳng vào 1 file report cụ thể:
+
+```bash
+gdrive-mirror --retry-failed=/mnt/backup/gdrive-mirror-reports/failed-a1b2c3d4-20260719-030000.json \
+  --path=/mnt/backup/gdrive --creds=/etc/gdrive/creds.json
+```
+
+Retry cả item `permanent: true` (mặc định bị bỏ qua vì không tự khỏi):
+
+```bash
+gdrive-mirror --retry-failed=/mnt/backup/gdrive-mirror-reports \
+  --path=/mnt/backup/gdrive --creds=/etc/gdrive/creds.json \
+  --include-permanent
 ```
 
 ---
@@ -395,6 +452,32 @@ $trigger = New-ScheduledTaskTrigger -Daily -At 2:00AM
 
 Register-ScheduledTask -TaskName "GDriveMirror" -Action $action -Trigger $trigger `
   -Description "Dong bo mot chieu Google Drive -> D:\GDrive-Mirror" -RunLevel Highest
+```
+
+### 3.10 Chạy lại các item lỗi (`--retry-failed`)
+
+Trỏ thẳng vào thư mục report — tool tự chọn file `failed-*.json` mới nhất:
+
+```powershell
+.\gdrive-mirror.exe --retry-failed="D:\GDrive-Mirror-Reports" `
+  --path="D:\GDrive-Mirror" `
+  --creds="C:\Tools\gdrive\creds.json" `
+  --retry=10 --concurrency=4
+```
+
+Trỏ thẳng vào 1 file report cụ thể:
+
+```powershell
+.\gdrive-mirror.exe --retry-failed="D:\GDrive-Mirror-Reports\failed-a1b2c3d4-20260719-020000.json" `
+  --path="D:\GDrive-Mirror" --creds="C:\Tools\gdrive\creds.json"
+```
+
+Retry cả item `permanent: true` (mặc định bị bỏ qua vì không tự khỏi):
+
+```powershell
+.\gdrive-mirror.exe --retry-failed="D:\GDrive-Mirror-Reports" `
+  --path="D:\GDrive-Mirror" --creds="C:\Tools\gdrive\creds.json" `
+  --include-permanent
 ```
 
 ---

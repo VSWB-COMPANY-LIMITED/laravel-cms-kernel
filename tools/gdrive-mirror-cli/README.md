@@ -30,25 +30,48 @@ use the folder ID (from the Drive URL `.../folders/<ID>`).
 ## Usage
 
 ```bash
-gdrive-mirror <folderID> --path=<local_dir> [flags]
+gdrive-mirror <folderID> [<folderID> ...] --path=<local_dir> [flags]
+gdrive-mirror --retry-failed=<report.json|dir> --path=<local_dir> [flags]
 ```
 
-| Flag            | Default                                                       | Meaning                                        |
-| ---------------- | -------------------------------------------------------------- | ----------------------------------------------- |
-| `--path`          | *(required)*                                                    | Local destination directory                     |
-| `--creds`         | `$GOOGLE_APPLICATION_CREDENTIALS` or `./google-service-account-credentials.json` | Service-account JSON key file |
-| `--retry`         | `3`                                                              | Retries per file operation on network failure   |
-| `--force`         | `false`                                                          | Re-download everything (safe: never deletes)    |
-| `--dry-run`       | `false`                                                          | List first 20 items only, no download           |
-| `--limit`         | `0` (all)                                                        | Only process the first N items — testing        |
-| `--concurrency`   | `4`                                                               | Concurrent file downloads (goroutine pool)       |
+| Flag                  | Default                                                       | Meaning                                        |
+| ---------------------- | -------------------------------------------------------------- | ----------------------------------------------- |
+| `--path`               | *(required)*                                                    | Local destination directory                     |
+| `--creds`              | `$GOOGLE_APPLICATION_CREDENTIALS` or `./google-service-account-credentials.json` | Service-account JSON key file |
+| `--retry`              | `3`                                                              | Retries per file operation on network failure   |
+| `--force`              | `false`                                                          | Re-download everything (safe: never deletes)    |
+| `--dry-run`            | `false`                                                          | List first 20 items only, no download           |
+| `--limit`              | `0` (all)                                                        | Only process the first N items — testing        |
+| `--concurrency`        | `4`                                                               | Concurrent file downloads (goroutine pool)       |
+| `--retry-failed`       | *(unset)*                                                        | Path to a `failed-*.json` report (or its directory — newest picked) — retries only its items, no fresh listing |
+| `--include-permanent`  | `false`                                                          | With `--retry-failed`, also retry items marked `permanent` (default: skipped — they cannot self-heal) |
+| `--ignore-shrink`      | `false`                                                          | Skip the listing shrink-guard abort — only when you deliberately deleted a lot on Drive (PHP source's equivalent flag is `--allow-shrink`) |
 
-Example:
+One or more `<folderID>` arguments may be given — each folder is synced
+independently, sequentially, with its own local subfolder and its own
+report files. A single `<folderID>` behaves exactly as before (no change).
+
+Example — single folder:
 
 ```bash
 gdrive-mirror 0Bw6yYZTQJcm3aGoxTGJuY1p1ZU0 \
   --path=/Volumes/WD-DATA1/GDrive-Mirror \
   --retry=10 --concurrency=8
+```
+
+Example — multiple folders in one invocation:
+
+```bash
+gdrive-mirror 0Bw6yYZTQJcm3aGoxTGJuY1p1ZU0 0Bw6yYZTQJcm3bGV4RVJESGxYUmc \
+  --path=/Volumes/WD-DATA1/GDrive-Mirror \
+  --retry=10 --concurrency=8
+```
+
+Example — retry only what failed last time:
+
+```bash
+gdrive-mirror --retry-failed=/Volumes/WD-DATA1/gdrive-mirror-reports \
+  --path=/Volumes/WD-DATA1/GDrive-Mirror
 ```
 
 Step-by-step sample commands per OS (macOS / Linux / Windows) — including
@@ -119,6 +142,39 @@ Scheduler), and troubleshooting: **[RUN-SAMPLES.md](RUN-SAMPLES.md)**.
   after a 1s pause before being trusted — Drive's `files.list` has been
   observed to return an empty page for a folder that actually has children
   under API load.
+- **Listing shrink-guard**: after a normal (non-`--dry-run`) listing
+  completes, this folder's item count is compared against the previous
+  run's — stored in `<path>/../gdrive-mirror-reports/state/<folderTag>.json`
+  (`folder_id`/`item_count`/`listed_at`/`run_id`, same field names as the
+  PHP source's state file so either implementation can read the other's).
+  If the count dropped below **80%** of last time, the run **aborts that
+  folder** (no download, state left untouched) instead of risking a mirror
+  written over what might be a truncated/permission-revoked listing — a
+  drop this size is far more likely to mean "Drive API hiccup / access
+  revoked" than "someone really deleted 20%+ of the files". Pass
+  `--ignore-shrink` when you know the drop is real (you just deleted a lot
+  on Drive yourself). No prior state (first sync of a folder) or a
+  corrupt/unreadable state file never aborts — treated as "nothing to
+  compare against yet". Skipped entirely in `--dry-run` (a throwaway
+  listing must never become the baseline). Ports `shouldAbortOnShrink()` /
+  `readListingState()` / `writeListingState()` from the PHP source
+  (`GDriveMirrorSync.php`).
+- **Multiple folder IDs in one invocation**: each `<folderID>` given is
+  synced independently and sequentially, with its own local subfolder, own
+  `runID`, and own report files. One folder erroring out (or its shrink
+  guard tripping) does **not** stop the rest — except when the local
+  filesystem circuit breaker trips, since a dead/unmounted destination disk
+  would fail every remaining folder identically too, so the run stops there
+  instead of wasting time. Exit code is `1` if **any** folder had item
+  errors or was aborted.
+- **`--retry-failed`**: re-run mode that skips listing Drive entirely and
+  downloads only the items listed in a prior `failed-*.json` report — point
+  it at the file directly, or at the reports directory to auto-pick the
+  newest one. Permanent items (won't self-heal — locked file, export size
+  limit, revoked permission…) are skipped by default; pass
+  `--include-permanent` to retry them anyway. Every item still goes through
+  the same `internal/localpath.SafeJoin` validation as a live listing — a
+  hand-edited report JSON is not treated as trusted input.
 
 ## Reports
 
@@ -126,8 +182,8 @@ When any item fails, reports are written to
 `<path>/../gdrive-mirror-reports/`:
 
 - `failed-<folderTag>-<YYYYMMDD-HHMMSS>.json` — full detail per item
-  (path/id/mimeType/md5/size/reason/permanent/category/error_reason),
-  shaped for a future `--retry-failed` re-run. Only the 10 most recent are
+  (path/id/mimeType/md5/size/reason/permanent/category/error_reason), the
+  exact shape `--retry-failed` reads back in. Only the 10 most recent are
   kept (older ones auto-pruned).
 - `<ddmmYYYY_HHMMSS>.csv` — Excel-safe (UTF-8 BOM, `;` delimiter — plain
   `,` gets misread as a decimal separator under VN locale Excel), columns
@@ -145,6 +201,11 @@ When any item fails, reports are written to
   file view). Unlike the reports above, this file is **always overwritten**
   and reflects the folder's *current* state rather than one run's history —
   it's deleted automatically once the folder has no more permanent failures.
+- `state/<folderTag>.json` — the listing shrink-guard's baseline for the
+  NEXT run (`folder_id`/`item_count`/`listed_at`/`run_id`). Always written
+  after a normal (non-`--dry-run`, non-`--retry-failed`) listing that the
+  guard accepted; never written when the guard aborts, so a bad listing
+  can't poison the next comparison.
 
 ## Upgrading an existing mirror (one-time, read this first)
 
@@ -163,22 +224,16 @@ one-way-never-delete is the safety property this tool is built around.
 
 ## Known gaps vs. the PHP source (deferred, not in this MVP)
 
-- Listing item-count shrink guard (`shouldAbortOnShrink` logic exists and
-  is unit-tested in `internal/classify`, but nothing persists prior-run
-  state yet to call it from)
-- `--retry-failed` / `--include-permanent` re-run mode (the JSON report
-  shape is already compatible — this just needs a loader)
-- Multiple folder IDs in one invocation (PHP took `{folders?*}`; this CLI
-  takes exactly one `<folderID>`)
 - Path-based folder identifiers ("Parent/Child") — service-account mode
   never supported these in the PHP source either (Folder ID only)
 
 ## Package layout
 
 ```
-main.go                       CLI flag parsing + orchestration entrypoint
-internal/classify/            Pure error-classification helpers (unit tested)
+main.go                       CLI flag parsing + multi-folder/retry-failed orchestration entrypoint
+internal/classify/            Pure error-classification + shrink-guard helpers (unit tested)
 internal/localpath/           Pure name-sanitize/truncate/safe-join helpers (unit tested)
-internal/mirror/              List/delta/download/retry/circuit-breaker/worker-pool
-internal/report/              Failed-item JSON/CSV/XLSX report writers + unexportable manifest
+internal/mirror/              List/delta/download/retry/circuit-breaker/shrink-guard/worker-pool
+internal/report/              Failed-item JSON/CSV/XLSX report writers, unexportable manifest,
+                               --retry-failed loader, listing-state read/write
 ```

@@ -84,7 +84,7 @@ func TestBuildFailedRows_SortOrder(t *testing.T) {
 
 func TestWriteFailedReportJSON_EmptyNoOp(t *testing.T) {
 	dir := t.TempDir()
-	path, err := WriteFailedReportJSON(dir, nil, "/base", []string{"f1"}, "run1")
+	path, err := WriteFailedReportJSON(dir, nil, "/base", "Prefix", []string{"f1"}, "run1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestWriteFailedReportJSON_WritesAndCounts(t *testing.T) {
 		{Path: "a.pdf", Permanent: true, Category: "Not found"},
 		{Path: "b.pdf", Permanent: false, Category: "Network / timeout"},
 	}
-	path, err := WriteFailedReportJSON(dir, items, "/base", []string{"folder1"}, "run1")
+	path, err := WriteFailedReportJSON(dir, items, "/base", "Prefix", []string{"folder1"}, "run1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
