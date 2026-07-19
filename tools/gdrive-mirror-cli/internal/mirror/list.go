@@ -3,7 +3,6 @@ package mirror
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -236,13 +235,19 @@ func resolveSiblingNames(children []rawChild) []resolvedChild {
 		}
 		// reserve=0: the download-side temp file (see download.go) now has a
 		// fixed-size name of its own, so nothing here needs to leave headroom
-		// for it anymore.
-		name = localpath.TruncateComponent(name, 0)
+		// for it anymore. Directories go through the dir-aware variant: a
+		// folder like "WEB19.0607 Ms Giau - ..." has no extension, and
+		// pretending the tail after its dot is one mangles the name.
+		if c.isFolder {
+			name = localpath.TruncateComponentDir(name, 0)
+		} else {
+			name = localpath.TruncateComponent(name, 0)
+		}
 
 		key := strings.ToLower(name)
 		collided := used[key]
 		if collided {
-			name = disambiguate(name, c.id, used)
+			name = disambiguate(name, c.id, used, c.isFolder)
 		}
 		used[strings.ToLower(name)] = true
 
@@ -260,7 +265,7 @@ func resolveSiblingNames(children []rawChild) []resolvedChild {
 // back to a numeric counter if even the full ID does (Drive IDs are unique,
 // so this branch is unreachable in practice — it exists only so the loop is
 // provably terminating).
-func disambiguate(name string, id string, used map[string]bool) string {
+func disambiguate(name string, id string, used map[string]bool, isDir bool) string {
 	// Start at min(8, len(id)), not a hard 8: an ID shorter than 8 chars made
 	// this loop run zero times and drop straight through to the counter branch
 	// below, producing an ugly "_ID-2" name when the ID branch would have done
@@ -270,7 +275,7 @@ func disambiguate(name string, id string, used map[string]bool) string {
 		start = len(id)
 	}
 	for n := start; n <= len(id); n += 4 {
-		candidate := withIDSuffix(name, id, n)
+		candidate := withIDSuffix(name, id, n, isDir)
 		if !used[strings.ToLower(candidate)] {
 			return candidate
 		}
@@ -279,27 +284,34 @@ func disambiguate(name string, id string, used map[string]bool) string {
 		// The counter belongs BEFORE the extension like every other suffix —
 		// appending it to the end produced "bao cao_ID.pdf-2", i.e. a file that
 		// lost its .pdf extension entirely and no longer opens by association.
-		candidate := withSuffixBeforeExt(name, "_"+id+fmt.Sprintf("-%d", i))
+		candidate := withSuffixBeforeExt(name, "_"+id+fmt.Sprintf("-%d", i), isDir)
 		if !used[strings.ToLower(candidate)] {
 			return candidate
 		}
 	}
 }
 
-func withIDSuffix(name, id string, n int) string {
+func withIDSuffix(name, id string, n int, isDir bool) string {
 	if n > len(id) {
 		n = len(id)
 	}
-	return withSuffixBeforeExt(name, "_"+id[:n])
+	return withSuffixBeforeExt(name, "_"+id[:n], isDir)
 }
 
 // withSuffixBeforeExt inserts suffix immediately before name's extension and
 // re-caps the result at the 255-byte limit. Shared by every disambiguation
 // suffix (short ID, full ID, counter) so no call site can accidentally append
 // past the extension.
-func withSuffixBeforeExt(name, suffix string) string {
-	ext := filepath.Ext(name)
-	base := strings.TrimSuffix(name, ext)
+func withSuffixBeforeExt(name, suffix string, isDir bool) string {
+	// localpath.SplitExt, not filepath.Ext: on a real 4843-item run the folder
+	// "WEB19.0607 Ms Giau - Coding _ GHN - Facebook App" came out as
+	// "WEB19_1e1Z27tn.0607 Ms Giau - ..." because filepath.Ext called the
+	// entire tail after "WEB19" an extension and the suffix landed in the
+	// middle of the name (2026-07-19).
+	base, ext := localpath.SplitExt(name, isDir)
+	if isDir {
+		return localpath.TruncateComponentDir(base+suffix, 0)
+	}
 	return localpath.TruncateComponent(base+suffix+ext, 0)
 }
 

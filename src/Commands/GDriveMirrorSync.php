@@ -1609,7 +1609,7 @@ class GDriveMirrorSync extends Command
      * dài, giữ nguyên nó verbatim đẩy kết quả VƯỢT 255 byte (đo thật: tên 311 byte ra 308 byte).
      * MAX_EXT_BYTES chặn bẫy này: quá ngưỡng thì coi như văn bản thường, cho cắt như phần còn lại.
      */
-    public static function truncateNameComponent(string $name, int $reserve = 0): string
+    public static function truncateNameComponent(string $name, int $reserve = 0, bool $isDir = false): string
     {
         $limit = self::MAX_COMPONENT_BYTES - $reserve;
         if ($limit < 0) {
@@ -1621,12 +1621,7 @@ class GDriveMirrorSync extends Command
 
         $suffix = '~' . substr(hash('sha256', $name), 0, 6);
 
-        $ext = pathinfo($name, PATHINFO_EXTENSION);
-        $ext = $ext !== '' ? '.' . $ext : '';
-        if (strlen($ext) > self::MAX_EXT_BYTES) {
-            $ext = '';
-        }
-        $base = $ext !== '' ? substr($name, 0, strlen($name) - strlen($ext)) : $name;
+        [$base, $ext] = self::splitNameExt($name, $isDir);
 
         // Nếu ngay cả suffix+ext cũng không vừa, bỏ luôn phần mở rộng, và nếu vẫn không vừa thì
         // hard-cut cả $name — trần byte là INVARIANT mà caller trông cậy vào, luôn thắng mọi mối
@@ -2043,12 +2038,12 @@ class GDriveMirrorSync extends Command
             // mục 3 + atomicTempPath()), NHƯNG tên file tạm là HASH của $targetLocalPath (độ dài
             // cố định), KHÔNG nối vào $name — giống hệt cách bản Go tránh vấn đề này ở
             // tempDownloadPath() — nên vẫn không cần chừa byte cho bất kỳ hậu tố tạm nào ở đây.
-            $name = self::truncateNameComponent($name, 0);
+            $name = self::truncateNameComponent($name, 0, $isFolder);
 
             $key = mb_strtolower($name);
             $collided = isset($used[$key]);
             if ($collided) {
-                $name = self::disambiguateLocalName($name, (string) $child['id'], $used);
+                $name = self::disambiguateLocalName($name, (string) $child['id'], $used, $isFolder);
             }
             $used[mb_strtolower($name)] = true;
 
@@ -2065,7 +2060,7 @@ class GDriveMirrorSync extends Command
      * fallback bộ đếm số nếu cả ID đầy đủ cũng đụng (Drive ID vốn unique nên nhánh này không thể
      * xảy ra thật — tồn tại chỉ để chứng minh vòng lặp CHẮC CHẮN dừng).
      */
-    private static function disambiguateLocalName(string $name, string $id, array $used): string
+    private static function disambiguateLocalName(string $name, string $id, array $used, bool $isDir = false): string
     {
         $idLen = strlen($id);
         // Bắt đầu ở min(8, $idLen), KHÔNG phải 8 cứng: một ID ngắn hơn 8 ký tự làm vòng lặp
@@ -2073,7 +2068,7 @@ class GDriveMirrorSync extends Command
         // ("_ID-2") dù nhánh ID hoàn toàn đủ dùng. (Bắt được khi review port PHP 2026-07-19;
         // bản Go có y hệt khiếm khuyết này và đã sửa cùng lúc.)
         for ($n = min(8, $idLen); $n <= $idLen; $n += 4) {
-            $candidate = self::withIdSuffix($name, $id, $n);
+            $candidate = self::withIdSuffix($name, $id, $n, $isDir);
             if (! isset($used[mb_strtolower($candidate)])) {
                 return $candidate;
             }
@@ -2082,16 +2077,16 @@ class GDriveMirrorSync extends Command
             // Bộ đếm phải nằm TRƯỚC phần mở rộng như mọi hậu tố khác — nối vào cuối tên sẽ ra
             // "bao cao_ID.pdf-2", tức file mất luôn đuôi .pdf và OS/Explorer không còn nhận ra
             // kiểu file nữa. (Cùng đợt review 2026-07-19.)
-            $candidate = self::withSuffixBeforeExt($name, '_' . $id . '-' . $i);
+            $candidate = self::withSuffixBeforeExt($name, '_' . $id . '-' . $i, $isDir);
             if (! isset($used[mb_strtolower($candidate)])) {
                 return $candidate;
             }
         }
     }
 
-    private static function withIdSuffix(string $name, string $id, int $n): string
+    private static function withIdSuffix(string $name, string $id, int $n, bool $isDir = false): string
     {
-        return self::withSuffixBeforeExt($name, '_' . substr($id, 0, min($n, strlen($id))));
+        return self::withSuffixBeforeExt($name, '_' . substr($id, 0, min($n, strlen($id))), $isDir);
     }
 
     /**
@@ -2099,13 +2094,38 @@ class GDriveMirrorSync extends Command
      * Dùng chung cho mọi kiểu hậu tố chống trùng (ID rút gọn, ID đầy đủ, bộ đếm) để không
      * chỗ nào lỡ tay nối ra sau đuôi file.
      */
-    private static function withSuffixBeforeExt(string $name, string $suffix): string
+    private static function withSuffixBeforeExt(string $name, string $suffix, bool $isDir = false): string
     {
+        // splitNameExt() chứ KHÔNG phải pathinfo() trần: trên lần chạy thật 4843 item
+        // (2026-07-19) thư mục "WEB19.0607 Ms Giau - Coding _ GHN - Facebook App" ra thành
+        // "WEB19_1e1Z27tn.0607 Ms Giau - ..." vì pathinfo() coi cả phần đuôi sau "WEB19" là
+        // phần mở rộng nên hậu tố chống trùng rơi vào GIỮA tên.
+        [$base, $ext] = self::splitNameExt($name, $isDir);
+
+        return self::truncateNameComponent($base . $suffix . $ext, 0, $isDir);
+    }
+
+    /**
+     * Tách $name thành [base, ext], CHỈ khi phần đuôi thật sự trông giống phần mở rộng.
+     * `pathinfo(PATHINFO_EXTENSION)` lấy từ dấu chấm CUỐI CÙNG — sai ở hai chỗ với tên Drive
+     * thật: (1) cắt độ dài, tên kiểu "Bao cao Q1.2026 - <200 ký tự>" có "phần mở rộng" 200 byte
+     * làm kết quả vượt trần 255; (2) chèn hậu tố chống trùng, hậu tố rơi vào giữa tên (ca thật
+     * 2026-07-19 nêu trên). $isDir cắt đứt luôn câu hỏi: thư mục KHÔNG có phần mở rộng.
+     *
+     * @return array{0: string, 1: string}
+     */
+    public static function splitNameExt(string $name, bool $isDir = false): array
+    {
+        if ($isDir) {
+            return [$name, ''];
+        }
         $ext = pathinfo($name, PATHINFO_EXTENSION);
         $ext = $ext !== '' ? '.' . $ext : '';
-        $base = $ext !== '' ? substr($name, 0, strlen($name) - strlen($ext)) : $name;
+        if ($ext === '' || strlen($ext) > self::MAX_EXT_BYTES) {
+            return [$name, ''];
+        }
 
-        return self::truncateNameComponent($base . $suffix . $ext, 0);
+        return [substr($name, 0, strlen($name) - strlen($ext)), $ext];
     }
 
     /**

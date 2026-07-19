@@ -242,4 +242,25 @@ class GDriveResolveSiblingNamesTest extends TestCase
 
         $this->assertCount(2, array_unique($names), 'hai tên phải khác nhau sau khử trùng');
     }
+
+    /**
+     * Ca THẬT từ lần chạy 4843 item (2026-07-19): thư mục
+     * "WEB19.0607 Ms Giau - Coding _ GHN - Facebook App" bị trùng tên và hậu tố chống trùng
+     * chèn vào GIỮA tên ("WEB19_1e1Z27tn.0607 Ms Giau - ...") vì pathinfo() coi cả phần đuôi
+     * sau "WEB19" là phần mở rộng. Thư mục KHÔNG có phần mở rộng — hậu tố phải ở CUỐI.
+     */
+    public function test_folder_name_containing_dot_keeps_suffix_at_the_end(): void
+    {
+        $dir = 'WEB19.0607 Ms Giau - Coding _ GHN - Facebook App';
+        $resolved = GDriveMirrorSync::resolveSiblingNames([
+            $this->rawChild(['id' => '1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'name' => $dir, 'isFolder' => true, 'mimeType' => 'application/vnd.google-apps.folder']),
+            $this->rawChild(['id' => '1e1Z27tnkodv7hsALrTCHxSp-ACdmdbfB', 'name' => $dir, 'isFolder' => true, 'mimeType' => 'application/vnd.google-apps.folder']),
+        ]);
+
+        $names = array_column($resolved, 'localName');
+        foreach ($names as $name) {
+            $this->assertStringStartsWith('WEB19.0607 Ms Giau', $name, "tên thư mục bị chèn hậu tố vào giữa: {$name}");
+        }
+        $this->assertCount(2, array_unique($names));
+    }
 }

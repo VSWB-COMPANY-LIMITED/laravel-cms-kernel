@@ -47,6 +47,31 @@ const maxComponentBytes = 255
 // where keeping it verbatim would eat the whole byte budget.
 const maxExtBytes = 32
 
+// SplitExt splits name into base + extension, but ONLY when the trailing
+// segment actually looks like an extension. filepath.Ext returns everything
+// after the LAST dot, which is wrong twice over for real Drive names:
+//
+//   - Truncation: "Bao cao Q1.2026 - tong ket <200 more chars>" has a
+//     200-byte "extension"; preserving it verbatim pushed a 311-byte name to
+//     308 bytes, over the 255 cap (caught in review 2026-07-19).
+//   - Collision suffixing: the folder "WEB19.0607 Ms Giau - Coding _ GHN -
+//     Facebook App" became "WEB19_1e1Z27tn.0607 Ms Giau - Coding _ GHN -
+//     Facebook App" — the disambiguation suffix landed in the MIDDLE of the
+//     name (caught on a real 4843-item run 2026-07-19).
+//
+// isDir short-circuits the whole question: a directory has no extension, so
+// nothing after a dot in its name is ever special.
+func SplitExt(name string, isDir bool) (base, ext string) {
+	if isDir {
+		return name, ""
+	}
+	ext = filepath.Ext(name)
+	if len(ext) > maxExtBytes {
+		return name, ""
+	}
+	return strings.TrimSuffix(name, ext), ext
+}
+
 // SanitizeComponent makes name safe as a SINGLE path component (no
 // directory separators of its own). It:
 //  1. Replaces control characters and any of `< > : " | ? * \ /` with `_`
@@ -98,6 +123,16 @@ func SanitizeComponent(name string) string {
 // truncated prefix must NOT collapse onto the same local file (a truncate-
 // only scheme silently would).
 func TruncateComponent(name string, reserve int) string {
+	return truncate(name, reserve, false)
+}
+
+// TruncateComponentDir is TruncateComponent for a DIRECTORY name — a
+// directory has no extension, so none is carved out and preserved.
+func TruncateComponentDir(name string, reserve int) string {
+	return truncate(name, reserve, true)
+}
+
+func truncate(name string, reserve int, isDir bool) string {
 	limit := maxComponentBytes - reserve
 	if limit < 0 {
 		limit = 0
@@ -109,18 +144,7 @@ func TruncateComponent(name string, reserve int) string {
 	sum := sha256.Sum256([]byte(name))
 	suffix := "~" + hex.EncodeToString(sum[:])[:6]
 
-	// The "extension" is only worth preserving when it actually looks like
-	// one. filepath.Ext returns everything after the LAST dot, which for a
-	// name like "Bao cao Q1.2026 - tong ket <200 more chars>" is the whole
-	// tail — keeping that verbatim used to push the result back over the
-	// limit (caught in review: a 311-byte name came out at 308 bytes). Past
-	// maxExtBytes, treat the tail as ordinary text and let it be truncated
-	// like the rest of the name.
-	ext := filepath.Ext(name)
-	if len(ext) > maxExtBytes {
-		ext = ""
-	}
-	base := strings.TrimSuffix(name, ext)
+	base, ext := SplitExt(name, isDir)
 
 	// If even suffix+ext cannot fit, drop the extension too and, failing
 	// that, hard-cut the name — the byte cap is the invariant callers rely

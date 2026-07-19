@@ -186,3 +186,40 @@ func TestResolveSiblingNames_ShortIDKeepsExtension(t *testing.T) {
 		t.Fatalf("names not deduped: %q", resolved[0].localName)
 	}
 }
+
+// Tên THẬT lấy từ lần chạy 4843 item ngày 2026-07-19: thư mục
+// "WEB19.0607 Ms Giau - Coding _ GHN - Facebook App" bị trùng tên, và hậu tố
+// chống trùng chèn vào GIỮA tên ("WEB19_1e1Z27tn.0607 Ms Giau - ...") vì
+// filepath.Ext coi cả phần đuôi sau "WEB19" là phần mở rộng. Thư mục KHÔNG có
+// phần mở rộng — hậu tố phải nằm ở CUỐI.
+func TestResolveSiblingNames_FolderWithDotKeepsSuffixAtEnd(t *testing.T) {
+	const dirName = "WEB19.0607 Ms Giau - Coding _ GHN - Facebook App"
+	resolved := resolveSiblingNames([]rawChild{
+		{id: "1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", name: dirName, mimeType: FolderMimeType, isFolder: true},
+		{id: "1e1Z27tnkodv7hsALrTCHxSp-ACdmdbfB", name: dirName, mimeType: FolderMimeType, isFolder: true},
+	})
+
+	for _, r := range resolved {
+		if !strings.HasPrefix(r.localName, "WEB19.0607 Ms Giau") {
+			t.Errorf("tên thư mục bị cắt xén ở giữa: %q", r.localName)
+		}
+	}
+	if resolved[0].localName == resolved[1].localName {
+		t.Fatalf("hai thư mục trùng tên chưa được khử: %q", resolved[0].localName)
+	}
+	t.Logf("giữ tên gốc : %q", resolved[0].localName)
+	t.Logf("đổi tên     : %q", resolved[1].localName)
+}
+
+// File thật thì vẫn phải giữ đúng phần mở rộng như cũ.
+func TestResolveSiblingNames_FileKeepsRealExtension(t *testing.T) {
+	resolved := resolveSiblingNames([]rawChild{
+		{id: "1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", name: "Câu Hỏi.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+		{id: "1ht4YwWKsoIhbWktmDWqKtyTjxMNLyUDU", name: "Câu Hỏi.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+	})
+	for _, r := range resolved {
+		if !strings.HasSuffix(r.localName, ".docx") {
+			t.Errorf("file mất phần mở rộng: %q", r.localName)
+		}
+	}
+}
