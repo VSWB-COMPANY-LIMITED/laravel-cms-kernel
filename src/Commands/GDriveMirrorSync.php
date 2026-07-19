@@ -380,6 +380,14 @@ class GDriveMirrorSync extends Command
     protected int $listingRetryHits = 0;
 
     /**
+     * C1-C4 audit (2026-07-19): đếm số lần resolveSiblingNames() phải đổi tên vì đụng anh em cùng
+     * cấp (file/folder trùng tên sau sanitize, hoặc case-only clash) — cộng dồn trong 1 folder gốc
+     * rồi gộp vào $stats['collisions'] sau khi listing xong (thay cho khối "Handle Name Collisions"
+     * cũ trong vòng lặp chính, nay đã chuyển hẳn lên tầng listing — xem fetchFolderChildrenViaApi()).
+     */
+    protected int $listingCollisions = 0;
+
+    /**
      * Số report JSON tối đa giữ lại trong storage/app/gdrive-sync/failed/ — tự prune report
      * cũ hơn sau mỗi lần ghi để tránh tích luỹ vô hạn (command chạy qua cron định kỳ).
      */
@@ -411,14 +419,68 @@ class GDriveMirrorSync extends Command
     protected const MAX_CONSECUTIVE_LOCAL_FS_ERRORS = 20;
 
     /**
-     * Google Native MimeTypes to Microsoft Office (OpenXML) Formats
+     * Google Native MimeTypes to Microsoft Office (OpenXML) Formats.
+     * Đổi từ property sang const (2026-07-19, audit C1-C5/L1-L3): resolveSiblingNames() cần đọc
+     * map này từ static context (dedup tên diễn ra ở tầng listing, thuần/không có $this).
      */
-    protected $exportMap = [
+    protected const EXPORT_MAP = [
         'application/vnd.google-apps.document'   => ['ext' => 'docx', 'mime' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
         'application/vnd.google-apps.spreadsheet' => ['ext' => 'xlsx', 'mime' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
         'application/vnd.google-apps.presentation' => ['ext' => 'pptx', 'mime' => 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
         'application/vnd.google-apps.drawing'      => ['ext' => 'png',  'mime' => 'image/png'],
         'application/vnd.google-apps.script'       => ['ext' => 'json', 'mime' => 'application/vnd.google-apps.script+json'],
+    ];
+
+    /**
+     * ── Name-safety constants (C1-C5/L1-L3 audit, 2026-07-19) ──────────────────────────────
+     * Port 1:1 từ tools/gdrive-mirror-cli/internal/localpath/localpath.go — xem docblock các
+     * hàm sanitizeNameComponent()/truncateNameComponent()/safeJoinLocalPath() bên dưới.
+     */
+
+    /** Ký tự NTFS từ chối trong 1 path component. Drive cho phép tất cả trong tên file (L2). */
+    protected const FORBIDDEN_NAME_CHARS = ['<', '>', ':', '"', '|', '?', '*', '\\', '/'];
+
+    /**
+     * Tên thiết bị MS-DOS Windows từ chối làm path component bất kể phần mở rộng — "CON.txt"
+     * SAI y hệt "CON" trần (L3).
+     */
+    protected const WINDOWS_RESERVED_NAMES = [
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+    ];
+
+    /**
+     * Giới hạn BYTE (KHÔNG PHẢI ký tự) cho 1 path component — giới hạn cứng của NTFS, không lách
+     * được (L1). PHP trên Windows cũng dính MAX_PATH 260 cho FULL path, nhưng đó là non-goal ở
+     * đây (giống ghi chú maxComponentBytes bản Go) — chỉ cần đảm bảo TỪNG component ≤255 byte.
+     */
+    protected const MAX_COMPONENT_BYTES = 255;
+
+    /**
+     * Trần độ dài 1 "đuôi" `.xxx` còn được coi là extension thật đáng giữ nguyên khi truncate.
+     * Cao hơn hẳn extension thật dài nhất thường gặp (".presentation" = 13 byte), thấp hơn hẳn
+     * mức ăn hết ngân sách byte — chặn bẫy `pathinfo()` lấy dấu chấm CUỐI làm "extension" (vd
+     * "Bao cao Q1.2026 - <text dài>" → coi cả đuôi dài là extension, giữ nguyên verbatim đẩy kết
+     * quả VƯỢT 255 byte — lỗi thật đã bắt được khi port bản Go, xem truncateNameComponent()).
+     */
+    protected const MAX_EXT_BYTES = 32;
+
+    /**
+     * Marker nhận diện lỗi do safeJoinLocalPath() ném ra (path thoát khỏi --path) — isInvalidLocalName()
+     * so khớp KHÔNG PHÂN BIỆT hoa/thường nên hằng số này giữ nguyên dạng gốc, chỉ cần là SUBSTRING
+     * của message thật.
+     */
+    protected const SAFE_JOIN_ERROR_MARKER = 'localpath.safeJoinLocalPath';
+
+    /**
+     * Cụm nhận diện lỗi OS về TÊN (quá dài / EINVAL) — khác lỗi ổ đĩa cục bộ (xem isLocalFsError()).
+     * "file name too long" = ENAMETOOLONG->getMessage() phổ biến trên macOS/Linux.
+     */
+    protected const INVALID_LOCAL_NAME_MARKERS = [
+        'file name too long',
+        'name too long',
+        'enametoolong',
     ];
 
     /**
@@ -560,8 +622,13 @@ class GDriveMirrorSync extends Command
             $stats = ['processed' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0, 'folders' => 0, 'failed_files' => [], 'collisions' => 0, 'total_listed' => 0];
 
             foreach ($targetIdentifiers as $identifier) {
+                // Lớp PHÒNG THỦ CUỐI (không còn là cơ chế dedup chính — xem C1-C4 audit
+                // 2026-07-19): dedup THẬT sự diễn ra ở tầng listing (resolveSiblingNames(), khoá
+                // theo Drive ID tăng dần, chung namespace file+folder). Nếu $targetLocalPath vẫn
+                // đụng ở đây thì đó là bug Ở TẦNG TRÊN — xem guard ngay trước withRetry() download.
                 $usedLocalPaths = []; // Reset per-folder to avoid cross-folder collision false-positives
                 $localPrefix = '';
+                $this->listingCollisions = 0; // Reset per-folder — cộng vào $stats['collisions'] sau khi listing xong
                 $currentDiskName = "gdrive_tmp_" . substr(md5((string) $identifier), 0, 8);
 
                 // Check if $identifier is an ID or a Path
@@ -585,10 +652,13 @@ class GDriveMirrorSync extends Command
 
                     try {
                         $folderInfo = $googleDisk->getAdapter()->getService()->files->get($identifier, ['fields' => 'name']);
-                        $localPrefix = $folderInfo->getName();
+                        // L2/L3: $localPrefix là 1 path component thật (segment gốc của cây local)
+                        // — cùng rủi ro tên-bẩn như bất kỳ tên con nào khác, phải qua sanitize +
+                        // truncate giống resolveSiblingNames() làm cho con cháu.
+                        $localPrefix = self::truncateNameComponent(self::sanitizeNameComponent($folderInfo->getName()), 0);
                         $this->info("\n🚀 SYNCING (Service Account) — Folder: {$localPrefix} ({$identifier})");
                     } catch (\Throwable $e) {
-                        $localPrefix = $identifier;
+                        $localPrefix = self::truncateNameComponent(self::sanitizeNameComponent((string) $identifier), 0);
                         $this->warn("\n🚀 SYNCING (Service Account) — Folder ID: {$identifier} (name lookup failed: {$e->getMessage()})");
                     }
                     $exploringPath = '';
@@ -662,6 +732,10 @@ class GDriveMirrorSync extends Command
                 $totalItems = count($remoteItems);
                 $this->info("Found {$totalItems} items.");
                 $stats['total_listed'] += $totalItems;
+                // C1-C4: collision đã được resolveSiblingNames() đếm+log NGAY tại tầng listing
+                // (fetchFolderChildrenViaApi()) — gộp vào stats tổng của identifier này. Với
+                // masbug/--retry-failed (không đi qua listing mới) $listingCollisions luôn 0, += vô hại.
+                $stats['collisions'] += $this->listingCollisions;
 
                 // BUG A-3 — LƯỚI AN TOÀN CUỐI CÙNG: so item-count folder gốc với lần chạy
                 // trước, KHÔNG PHỤ THUỘC nguyên nhân sụt giảm. BUG A-2 ở trên chỉ vá được cái
@@ -748,8 +822,49 @@ class GDriveMirrorSync extends Command
 
                     // Adjust local path if using ID (prefix with folder name)
                     $syncPath = $localPrefix ? $localPrefix . '/' . $relativePath : $relativePath;
-                    $absoluteLocalPath = "{$baseLocalPath}/{$syncPath}";
                     $type = is_array($item) ? ($item['type'] ?? 'file') : (method_exists($item, 'type') ? $item->type() : 'file');
+
+                    // C5/L2 (audit 2026-07-19): mọi component trong $syncPath đã đi qua
+                    // sanitizeNameComponent()/truncateNameComponent() ở tầng listing (xem
+                    // fetchFolderChildrenViaApi()) hoặc ở $localPrefix ngay phía trên — nhưng đây
+                    // vẫn là điểm PHÒNG THỦ CUỐI CÙNG trước khi chạm filesystem thật (masbug/
+                    // --retry-failed KHÔNG đi qua resolveSiblingNames(), và path từ report JSON cũ
+                    // có thể sinh ra TRƯỚC khi fix này tồn tại). safeJoinLocalPath() bảo đảm kết
+                    // quả không bao giờ thoát khỏi $baseLocalPath, y hệt localpath.SafeJoin() bản Go.
+                    try {
+                        $absoluteLocalPath = self::safeJoinLocalPath($baseLocalPath, $syncPath);
+                    } catch (\Throwable $e) {
+                        // Lỗi TÊN (traversal/escape), KHÔNG PHẢI lỗi ổ đĩa cục bộ — permanent,
+                        // KHÔNG tính vào $consecutiveLocalFsErrors (circuit breaker chỉ dành cho ổ
+                        // đích hỏng/unmount, xem isInvalidLocalName()/classifyDriveError()).
+                        $stats['errors']++;
+                        $itemId = is_array($item) ? ($item['id'] ?? null) : null;
+                        $classified = self::classifyDriveError($e->getMessage());
+                        $stats['failed_files'][] = [
+                            'type' => $type,
+                            'path' => $relativePath,
+                            'id' => $itemId,
+                            'mimeType' => is_array($item) ? ($item['mimeType'] ?? null) : null,
+                            'md5Checksum' => is_array($item) ? ($item['md5Checksum'] ?? null) : null,
+                            'timestamp' => is_array($item) ? ($item['timestamp'] ?? 0) : 0,
+                            'size' => is_array($item) ? (int) ($item['size'] ?? 0) : 0,
+                            'attempts' => 0,
+                            'reason' => $e->getMessage(),
+                            'permanent' => ! $classified['retryable'],
+                            'error_reason' => $classified['reason'],
+                            'category' => $classified['category'],
+                        ];
+                        $this->error("\n   ❌ Rejected unsafe path (traversal/escape): {$relativePath} | Reason: {$e->getMessage()}");
+                        Log::channel($this->log_channel)->error("GDrive Sync: safeJoinLocalPath rejected path", [
+                            'run_id' => $this->runId,
+                            'path' => $relativePath,
+                            'sync_path' => $syncPath,
+                            'base_local_path' => $baseLocalPath,
+                            'error' => $e->getMessage(),
+                        ]);
+                        $bar->advance();
+                        continue;
+                    }
 
                     if ($type === 'dir') {
                         if (!File::isDirectory($absoluteLocalPath)) {
@@ -828,7 +943,7 @@ class GDriveMirrorSync extends Command
 
                         // Decide target path (Normal vs Export)
                         $targetLocalPath = $absoluteLocalPath;
-                        $exportSpec = $this->exportMap[$mimeType] ?? null;
+                        $exportSpec = self::EXPORT_MAP[$mimeType] ?? null;
 
                         // Deep Check for Google Native Files if MimeType is missing or generic
                         $fileMeta = null;
@@ -839,7 +954,7 @@ class GDriveMirrorSync extends Command
                                 $fileMeta = $service->files->get($fileId, ['fields' => 'id, name, mimeType, md5Checksum, shortcutDetails']);
                                 $mimeType = $fileMeta->getMimeType();
                                 $remoteMd5 = $fileMeta->getMd5Checksum();
-                                $exportSpec = $this->exportMap[$mimeType] ?? null;
+                                $exportSpec = self::EXPORT_MAP[$mimeType] ?? null;
                             } catch (\Throwable $e) {
                                 // Nuốt lỗi trước đây → mất dấu vết khi deep-check thất bại (vd file
                                 // vừa bị xoá/mất quyền); không fail cả sync, chỉ giữ mimeType gốc.
@@ -870,25 +985,56 @@ class GDriveMirrorSync extends Command
                             continue;
                         }
 
+                        // Đuôi export (.docx/.xlsx/…) BÌNH THƯỜNG đã có SẴN trong $absoluteLocalPath
+                        // — resolveSiblingNames() quyết định nó ngay ở tầng listing, dùng mimeType
+                        // từ files.list (xem fetchFolderChildrenViaApi()). Nhánh append dưới đây CHỈ
+                        // còn cần thiết cho 1 kẽ hở kiến trúc RIÊNG CỦA PHP (bản Go không có): "Deep
+                        // Check" phía trên có thể phát hiện ra mimeType Google Native mà listing
+                        // KHÔNG biết trước (field mimeType từ files.list bị thiếu/generic — hiếm).
+                        // Chỉ append khi tên hiện tại CHƯA có đúng đuôi đó, để không nối lặp/nối sai
+                        // so với cái resolveSiblingNames() đã làm đúng ở đa số trường hợp.
                         if ($exportSpec) {
-                            $targetLocalPath = $absoluteLocalPath . '.' . $exportSpec['ext'];
+                            $expectedSuffix = '.' . $exportSpec['ext'];
+                            if (! str_ends_with($targetLocalPath, $expectedSuffix)) {
+                                $targetLocalPath = $absoluteLocalPath . $expectedSuffix;
+                            }
                         }
 
-                        // IMPROVEMENT 1 & 3: Handle Name Collisions
+                        // C1-C4 audit (2026-07-19): dedup THẬT sự đã chuyển hẳn lên tầng listing
+                        // (resolveSiblingNames(), khoá theo Drive ID tăng dần, chung namespace
+                        // file+folder — xem fetchFolderChildrenViaApi()). $usedLocalPaths ở đây giờ
+                        // chỉ còn là LỚP PHÒNG THỦ: nếu vẫn đụng thì đó là BUG Ở TẦNG TRÊN (không
+                        // phải trùng tên Drive thật) — KHÔNG được âm thầm đổi tên/ghi đè (đúng lỗi
+                        // gốc C1-C4 đã sửa), phải log ERROR + đưa vào failed_files (permanent) để
+                        // điều tra. File cũ tại path đó (nếu có, từ item trước trong CÙNG lần chạy)
+                        // giữ nguyên, không bị ghi đè bởi item thứ 2 này.
                         if (isset($usedLocalPaths[$targetLocalPath])) {
-                            $stats['collisions']++;
-                            $this->warn("\n   ⚠️ Collision: " . basename($targetLocalPath) . " already exists in this sync. Appending ID.");
-
-                            $info = pathinfo($targetLocalPath);
-                            $ext = $info['extension'] ?? '';
-                            $newName = $info['filename'] . '_' . substr($fileId, 0, 8);
-                            $targetLocalPath = $info['dirname'] . DIRECTORY_SEPARATOR . $newName . ($ext ? "." . $ext : "");
-
-                            Log::channel($this->log_channel)->warning("GDrive Sync Collision", [
-                                'original' => $absoluteLocalPath,
-                                'new' => $targetLocalPath,
-                                'id' => $fileId
+                            $stats['errors']++;
+                            $reason = "internal collision guard tripped: '{$targetLocalPath}' already claimed by drive id {$usedLocalPaths[$targetLocalPath]} in this listing";
+                            $stats['failed_files'][] = [
+                                'type' => 'file',
+                                'path' => $relativePath,
+                                'id' => $fileId,
+                                'mimeType' => $mimeType,
+                                'md5Checksum' => $remoteMd5,
+                                'timestamp' => $remoteTimestamp,
+                                'size' => $remoteSize,
+                                'attempts' => 0,
+                                'reason' => $reason,
+                                'permanent' => true,
+                                'error_reason' => 'internalCollisionGuard',
+                                'category' => 'Internal collision guard (upstream bug, cần điều tra)',
+                            ];
+                            $this->error("\n   ❌ Internal collision guard tripped (KHÔNG ghi đè): {$targetLocalPath} — báo bug, xem log.");
+                            Log::channel($this->log_channel)->error("GDrive Sync: usedLocalPaths guard tripped — trùng tên lọt qua resolveSiblingNames()", [
+                                'run_id' => $this->runId,
+                                'path' => $relativePath,
+                                'target_local_path' => $targetLocalPath,
+                                'claimed_by_id' => $usedLocalPaths[$targetLocalPath],
+                                'this_id' => $fileId,
                             ]);
+                            $bar->advance();
+                            continue;
                         }
                         $usedLocalPaths[$targetLocalPath] = $fileId;
 
@@ -1165,6 +1311,14 @@ class GDriveMirrorSync extends Command
      */
     public static function classifyDriveError(string $msg): array
     {
+        // L1-L3/C5 audit (2026-07-19): kiểm TRƯỚC MỌI THỨ KHÁC — lỗi TÊN (quá dài/EINVAL/bị
+        // safeJoinLocalPath() từ chối) là lỗi Drive-side data problem VĨNH VIỄN, không được lẫn
+        // với lỗi Drive API thật (bị retry vô ích) hay lỗi ổ đĩa cục bộ (bị đếm vào circuit
+        // breaker oan — xem isLocalFsError()). Mirror classify.DriveError() bản Go.
+        if (self::isInvalidLocalName($msg)) {
+            return ['category' => 'Invalid or too-long local name', 'retryable' => false, 'reason' => 'invalidLocalName'];
+        }
+
         $decoded = json_decode($msg, true);
         $reason = null;
         $code = null;
@@ -1287,6 +1441,12 @@ class GDriveMirrorSync extends Command
         if ($msg === '') {
             return false;
         }
+        // Guard belt-and-suspenders (L1-L3/C5 audit 2026-07-19): 1 tên bẩn/quá dài/bị
+        // safeJoinLocalPath() từ chối KHÔNG BAO GIỜ được coi là bằng chứng ổ đĩa hỏng — dù các
+        // marker bên dưới có được mở rộng sau này theo cách vô tình chồng lấn. Xem isInvalidLocalName().
+        if (self::isInvalidLocalName($msg)) {
+            return false;
+        }
         $m = strtolower($msg);
 
         // Marker cứng — luôn là lỗi filesystem cục bộ dù không kèm gì khác. Drive API KHÔNG BAO
@@ -1326,6 +1486,199 @@ class GDriveMirrorSync extends Command
         }
 
         return false;
+    }
+
+    /**
+     * L1-L3/C5 audit (2026-07-19): nhận diện lỗi OS về chính cái TÊN (quá dài/EINVAL) hoặc lỗi
+     * safeJoinLocalPath() từ chối (traversal/escape) — LUÔN permanent, và LUÔN KHÔNG PHẢI bằng
+     * chứng ổ đĩa cục bộ đang hỏng (cùng nguyên tắc bất đối xứng ở docblock isLocalFsError(): 1
+     * item tên bẩn không được phép ABORT OAN cả run và đổ lỗi cho phần cứng). Mirror
+     * classify.IsInvalidLocalName() bản Go.
+     */
+    public static function isInvalidLocalName(string $msg): bool
+    {
+        if ($msg === '') {
+            return false;
+        }
+        $m = strtolower($msg);
+
+        if (str_contains($m, strtolower(self::SAFE_JOIN_ERROR_MARKER))) {
+            return true;
+        }
+        foreach (self::INVALID_LOCAL_NAME_MARKERS as $marker) {
+            if (str_contains($m, $marker)) {
+                return true;
+            }
+        }
+        // EINVAL trần ("invalid argument") quá chung chung để tin một mình — chỉ tính khi kèm 1
+        // đường dẫn tuyệt đối, cùng guard mà isLocalFsError() áp cho "permission denied" trần.
+        if (str_contains($m, 'invalid argument') && preg_match('#(?:^|[\s(:])/[\w./\-]+#', $msg) === 1) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Làm cho $name AN TOÀN khi dùng làm 1 PATH COMPONENT ĐƠN (không tự chứa dấu phân cách thư
+     * mục). Port 1:1 `localpath.SanitizeComponent()` bản Go (tools/gdrive-mirror-cli/internal/
+     * localpath/localpath.go) — xem docblock ở đó cho lý do đầy đủ. Pure/static, không I/O.
+     *
+     *  1. Thay ký tự control và bất kỳ ký tự nào trong `< > : " | ? * \ /` bằng `_` (L2).
+     *  2. Cắt dấu chấm/khoảng trắng CUỐI — Windows tự động bỏ chúng, nếu không xử lý thì 2 tên
+     *     Drive khác nhau ("foo" và "foo.") sẽ đụng nhau âm thầm trên NTFS.
+     *  3. Rỗng sau bước trên → fallback "_" — đây là cách "." và ".." (và tên toàn dấu chấm/toàn
+     *     ký tự cấm) không bao giờ được trả về nguyên văn là "." hoặc ".." (filesystem sẽ hiểu
+     *     thành self/parent-directory, không phải 1 tên thật).
+     *  4. Tên thiết bị Windows dành riêng (CON, PRN, COM1…) được chèn "_" — xét PHẦN TRƯỚC dấu
+     *     chấm ĐẦU TIÊN nên "CON.txt" cũng bị bắt (L3).
+     */
+    public static function sanitizeNameComponent(string $name): string
+    {
+        $replaced = str_replace(self::FORBIDDEN_NAME_CHARS, '_', $name);
+        $replaced = (string) preg_replace('/[\x00-\x1F]/', '_', $replaced);
+        $cleaned = rtrim($replaced, ". ");
+
+        if ($cleaned === '') {
+            return '_';
+        }
+
+        $dotPos = strpos($cleaned, '.');
+        $base = $dotPos === false ? $cleaned : substr($cleaned, 0, $dotPos);
+        $rest = $dotPos === false ? '' : substr($cleaned, $dotPos);
+
+        if (in_array(strtoupper($base), self::WINDOWS_RESERVED_NAMES, true)) {
+            return $base . '_' . $rest;
+        }
+
+        return $cleaned;
+    }
+
+    /**
+     * Giới hạn $name còn tối đa 255 BYTE UTF-8 trừ $reserve (chỗ chừa cho thứ caller sẽ nối thêm
+     * sau). Port 1:1 `localpath.TruncateComponent()` bản Go. Cắt LUÔN LUÔN đúng ranh giới ký tự
+     * UTF-8 (cắt giữa ký tự sẽ phá hỏng ký tự nhiều byte — dấu tiếng Việt là 2-3 byte/ký tự). Khi
+     * có cắt THẬT, nối "~" + 6 ký tự hex đầu của sha256(name) TRƯỚC phần mở rộng: 2 tên dài khác
+     * nhau vô tình cùng tiền tố sau khi cắt KHÔNG được phép gộp thành 1 file local.
+     *
+     * 🔴 Bẫy ĐÃ BẮT ĐƯỢC khi port bản Go (audit 2026-07-18/19): `pathinfo(...,PATHINFO_EXTENSION)`
+     * (tương đương `filepath.Ext` bên Go) lấy phần sau dấu chấm CUỐI CÙNG — với tên kiểu
+     * "Bao cao Q1.2026 - <text dài>" (rất phổ biến ở VN) thì "phần mở rộng" chính là cả cái đuôi
+     * dài, giữ nguyên nó verbatim đẩy kết quả VƯỢT 255 byte (đo thật: tên 311 byte ra 308 byte).
+     * MAX_EXT_BYTES chặn bẫy này: quá ngưỡng thì coi như văn bản thường, cho cắt như phần còn lại.
+     */
+    public static function truncateNameComponent(string $name, int $reserve = 0): string
+    {
+        $limit = self::MAX_COMPONENT_BYTES - $reserve;
+        if ($limit < 0) {
+            $limit = 0;
+        }
+        if (strlen($name) <= $limit) {
+            return $name;
+        }
+
+        $suffix = '~' . substr(hash('sha256', $name), 0, 6);
+
+        $ext = pathinfo($name, PATHINFO_EXTENSION);
+        $ext = $ext !== '' ? '.' . $ext : '';
+        if (strlen($ext) > self::MAX_EXT_BYTES) {
+            $ext = '';
+        }
+        $base = $ext !== '' ? substr($name, 0, strlen($name) - strlen($ext)) : $name;
+
+        // Nếu ngay cả suffix+ext cũng không vừa, bỏ luôn phần mở rộng, và nếu vẫn không vừa thì
+        // hard-cut cả $name — trần byte là INVARIANT mà caller trông cậy vào, luôn thắng mọi mối
+        // quan tâm thẩm mỹ (giữ extension) khác.
+        if ($limit < strlen($suffix) + strlen($ext)) {
+            $ext = '';
+        }
+        if ($limit < strlen($suffix)) {
+            return self::truncateOnByteBoundary($name, $limit);
+        }
+
+        $base = self::truncateOnByteBoundary($base, $limit - strlen($suffix) - strlen($ext));
+
+        return $base . $suffix . $ext;
+    }
+
+    /**
+     * Cắt $s còn tối đa $n byte, LUI dần nếu byte tại vị trí cắt là continuation byte UTF-8
+     * (10xxxxxx, tức 0x80-0xBF) — không bao giờ cắt giữa 1 ký tự nhiều byte. Tương đương
+     * `truncateOnRuneBoundary()` bản Go (dùng utf8.RuneStart).
+     */
+    private static function truncateOnByteBoundary(string $s, int $n): string
+    {
+        if ($n <= 0) {
+            return '';
+        }
+        if (strlen($s) <= $n) {
+            return $s;
+        }
+        while ($n > 0 && (ord($s[$n]) & 0xC0) === 0x80) {
+            $n--;
+        }
+
+        return substr($s, 0, $n);
+    }
+
+    /**
+     * Nối $root và $relPath rồi ĐẢM BẢO kết quả nằm TRONG $root — ném InvalidArgumentException
+     * nếu không. Port 1:1 `localpath.SafeJoin()` bản Go. Lớp phòng thủ CUỐI CÙNG chống 1 tên Drive
+     * thoát khỏi --path hoàn toàn (finding C5) — dù sanitizeNameComponent() đã lọc "/" và
+     * rtrim() đã khiến ".." không bao giờ sống sót như 1 component riêng lẻ.
+     *
+     * 🔴 Khác bản Go (dùng `filepath.Abs`+`filepath.Clean`, dựa vào syscall thật): PHP's
+     * `realpath()` trả `false` khi path CHƯA TỒN TẠI trên đĩa (rất thường — item đang sync còn
+     * chưa được tạo) → KHÔNG dùng được để chuẩn hoá. Chuẩn hoá bằng logic CHUỖI THUẦN
+     * (normalizePathComponents(), tự resolve "."/".." theo segment) thay vì gọi hệ thống file.
+     */
+    public static function safeJoinLocalPath(string $root, string $relPath): string
+    {
+        $rootAbs = self::normalizePathComponents($root);
+        $joined = self::normalizePathComponents($rootAbs . '/' . $relPath);
+
+        if ($joined !== $rootAbs && ! str_starts_with($joined, $rootAbs . '/')) {
+            throw new \InvalidArgumentException(
+                self::SAFE_JOIN_ERROR_MARKER . ": path escapes root (root={$root} relPath={$relPath} resolved={$joined})"
+            );
+        }
+
+        return $joined;
+    }
+
+    /**
+     * Chuẩn hoá $path bằng logic CHUỖI THUẦN (không đụng filesystem — xem lý do ở safeJoinLocalPath()):
+     * tách theo "/", bỏ segment rỗng/".", resolve ".." bằng cách pop segment liền trước (path
+     * tương đối không pop được nữa thì GIỮ LẠI ".." — đúng ngữ nghĩa "chưa biết gốc ở đâu"; path
+     * tuyệt đối thì DROP vì không thể đi lên trên "/"). $path không tuyệt đối được neo vào cwd
+     * hiện tại trước khi xử lý (khớp `filepath.Abs` bản Go).
+     */
+    private static function normalizePathComponents(string $path): string
+    {
+        if ($path === '') {
+            $path = '.';
+        }
+        if (! str_starts_with($path, '/')) {
+            $path = rtrim((string) (getcwd() ?: '/'), '/') . '/' . $path;
+        }
+
+        $stack = [];
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '' || $segment === '.') {
+                continue;
+            }
+            if ($segment === '..') {
+                if (! empty($stack) && end($stack) !== '..') {
+                    array_pop($stack);
+                }
+                // Tuyệt đối: ".." vượt quá gốc bị DROP (không thể đi lên trên "/"). Không có
+                // nhánh "giữ lại .." vì $path ở đây LUÔN đã được neo tuyệt đối ở trên.
+                continue;
+            }
+            $stack[] = $segment;
+        }
+
+        return '/' . implode('/', $stack);
     }
 
     /**
@@ -1486,16 +1839,23 @@ class GDriveMirrorSync extends Command
     }
 
     /**
-     * Liệt kê 1 lượt (đủ phân trang) các con TRỰC TIẾP + đệ quy con-của-con của $folderId qua
-     * Drive API. Tách riêng khỏi listFolderRecursiveViaApi() để lời gọi có thể được lặp lại
-     * (verify-on-zero ở trên) mà không đệ quy lại chính nó.
+     * Gom TOÀN BỘ trang con TRỰC TIẾP (không đệ quy) của $folderId qua Drive API — RAW, chưa qua
+     * sanitize/dedup tên. Tách khỏi fetchFolderChildrenViaApi() (audit C1-C5/L1-L3, 2026-07-19)
+     * để resolveSiblingNames() có đủ TOÀN BỘ tập anh em cùng cấp trước khi quyết định tên cuối —
+     * thiết kế cũ (list-while-recurse) quyết định tên ngay khi gặp từng item nên KHÔNG BAO GIỜ
+     * thấy được 1 anh em xuất hiện ở trang phân trang SAU, khiến quyết định dedup không ổn định
+     * (C4). Mirror `collectRawChildren()` bản Go 1:1.
+     *
+     * GIỮ NGUYÊN withRetry() cho mỗi trang + hành vi "lỗi thì dừng phân trang nhưng vẫn trả về
+     * những gì đã gom được" (BUG A-1/BUG B) — KHÔNG được ném exception giết cả sync.
+     *
+     * @return array<int, array{id:string,name:string,mimeType:string,md5Checksum:?string,timestamp:int,size:int,isFolder:bool}>
      */
-    protected function fetchFolderChildrenViaApi($service, string $folderId, string $relativePath): array
+    protected function collectRawChildrenViaApi($service, string $folderId, string $logPath): array
     {
-        $items = [];
+        $raw = [];
         $pageToken = null;
         $query = sprintf("'%s' in parents and trashed = false", str_replace("'", "\\'", $folderId));
-        $logPath = $relativePath !== '' ? $relativePath : '(root)';
 
         do {
             // BUG A-1: đây là chỗ DUY NHẤT không được bọc withRetry() — mọi download đều có
@@ -1519,30 +1879,190 @@ class GDriveMirrorSync extends Command
             }
 
             foreach ($response->getFiles() as $file) {
-                $isFolder = $file->getMimeType() === 'application/vnd.google-apps.folder';
-                $childPath = $relativePath !== '' ? $relativePath . '/' . $file->getName() : $file->getName();
-
-                $items[] = [
-                    'type' => $isFolder ? 'dir' : 'file',
-                    'path' => $childPath,
+                $raw[] = [
                     'id' => $file->getId(),
+                    'name' => $file->getName(),
                     'mimeType' => $file->getMimeType(),
                     'md5Checksum' => $file->getMd5Checksum(),
                     'timestamp' => $file->getModifiedTime() ? strtotime($file->getModifiedTime()) : 0,
                     'size' => (int) ($file->getSize() ?? 0),
+                    'isFolder' => $file->getMimeType() === 'application/vnd.google-apps.folder',
                 ];
-
-                if ($isFolder) {
-                    foreach ($this->listFolderRecursiveViaApi($service, $file->getId(), $childPath) as $child) {
-                        $items[] = $child;
-                    }
-                }
             }
 
             $pageToken = $response->getNextPageToken();
         } while ($pageToken);
 
+        return $raw;
+    }
+
+    /**
+     * Liệt kê 1 lượt (đủ phân trang) các con TRỰC TIẾP của $folderId, quyết định tên cuối AN
+     * TOÀN + KHÔNG TRÙNG cho toàn bộ tập anh em (resolveSiblingNames() — chung 1 namespace
+     * file+folder, khoá theo Drive ID tăng dần, fixes C1-C4), RỒI MỚI đệ quy vào từng folder con
+     * bằng path đã resolve. Tách khỏi listFolderRecursiveViaApi() để lời gọi có thể được lặp lại
+     * (verify-on-zero ở trên) mà không đệ quy lại chính nó.
+     *
+     * 🔴 Tái cấu trúc (audit C1-C5/L1-L3, 2026-07-19) từ thiết kế list-while-recurse cũ: tên được
+     * quyết định ngay trong lúc vẫn còn đang phân trang khiến 1 anh em trùng tên xuất hiện ở
+     * trang SAU không bao giờ được nhìn thấy → quyết định dedup không thể ổn định. Gom đủ tập
+     * anh em TRƯỚC (collectRawChildrenViaApi()) là điều kiện bắt buộc để dedup xác định được
+     * (resolveSiblingNames()).
+     *
+     * `path` của mỗi item trả về giờ đã là local path AN TOÀN (đã sanitize + truncate + dedup) —
+     * caller (handle()) chỉ cần nối với $baseLocalPath qua safeJoinLocalPath() làm lớp phòng thủ
+     * cuối, KHÔNG cần tự sanitize gì thêm.
+     */
+    protected function fetchFolderChildrenViaApi($service, string $folderId, string $relativePath): array
+    {
+        $logPath = $relativePath !== '' ? $relativePath : '(root)';
+
+        $raw = $this->collectRawChildrenViaApi($service, $folderId, $logPath);
+        $resolved = self::resolveSiblingNames($raw);
+
+        $items = [];
+        foreach ($resolved as $child) {
+            if ($child['collided']) {
+                $this->listingCollisions++;
+                $this->warn("\n   ⚠️ Trùng tên trong '{$logPath}': '{$child['name']}' (id={$child['id']}) phải đổi thành '{$child['localName']}' để không ghi đè/gộp với anh em cùng cấp.");
+                Log::channel($this->log_channel)->warning("GDrive Sync: name collision resolved at listing time", [
+                    'run_id' => $this->runId,
+                    'parent_path' => $logPath,
+                    'original_name' => $child['name'],
+                    'resolved_name' => $child['localName'],
+                    'id' => $child['id'],
+                ]);
+            }
+
+            $childPath = $relativePath !== '' ? $relativePath . '/' . $child['localName'] : $child['localName'];
+
+            $items[] = [
+                'type' => $child['isFolder'] ? 'dir' : 'file',
+                'path' => $childPath,
+                'id' => $child['id'],
+                'mimeType' => $child['mimeType'],
+                'md5Checksum' => $child['md5Checksum'],
+                'timestamp' => $child['timestamp'],
+                'size' => $child['size'],
+            ];
+
+            if ($child['isFolder']) {
+                foreach ($this->listFolderRecursiveViaApi($service, $child['id'], $childPath) as $descendant) {
+                    $items[] = $descendant;
+                }
+            }
+        }
+
         return $items;
+    }
+
+    /**
+     * Quyết định tên local CUỐI CÙNG, an toàn-trên-mọi-OS, KHÔNG TRÙNG cho MỌI con TRỰC TIẾP của
+     * 1 folder cha — MỘT namespace chung cho cả file LẪN folder (1 folder và 1 file trùng tên
+     * đụng nhau y hệt 2 file trùng tên — fixes C2: file ghi đè lên thư mục; C3: 2 folder gộp nội
+     * dung âm thầm). Pure/static (không gọi API) → test được không cần Drive thật, xem
+     * GDriveResolveSiblingNamesTest.
+     *
+     * Thứ tự quyết định theo DRIVE FILE ID TĂNG DẦN — KHÔNG theo thứ tự `files.list` trả về: Drive
+     * không đảm bảo thứ tự ổn định giữa 2 lần gọi. Quyết định theo thứ tự-đến-trước (arrival
+     * order) nghĩa là "kẻ thua" của 1 va chạm đổi tùy lúc Drive trả kết quả khác thứ tự — và vì
+     * tool này KHÔNG BAO GIỜ xoá file local, mỗi lần đổi để lại 1 bản rác mồ côi VĨNH VIỄN
+     * (fixes C4).
+     *
+     * Khoá dedup viết THƯỜNG vì ổ đích có thể là NTFS/APFS — cả 2 đều KHÔNG phân biệt hoa/thường
+     * theo mặc định: 2 tên Drive chỉ khác hoa/thường là 2 file KHÁC NHAU với Drive nhưng là CÙNG 1
+     * file trên đĩa đó — không xử lý sẽ âm thầm ghi đè (fixes C1).
+     *
+     * @param array<int, array{id:string,name:string,mimeType:string,md5Checksum:?string,timestamp:int,size:int,isFolder:bool}> $rawChildren
+     * @return array<int, array{id:string,name:string,mimeType:string,md5Checksum:?string,timestamp:int,size:int,isFolder:bool,localName:string,collided:bool}>
+     */
+    public static function resolveSiblingNames(array $rawChildren): array
+    {
+        $sorted = $rawChildren;
+        usort($sorted, static fn (array $a, array $b) => $a['id'] <=> $b['id']);
+
+        $used = [];
+        $resolved = [];
+
+        foreach ($sorted as $child) {
+            $name = self::sanitizeNameComponent((string) $child['name']);
+            // 'isFolder' được collectRawChildrenViaApi() điền sẵn, nhưng suy lại từ mimeType khi
+            // thiếu để hàm thuần này dùng được với mảng item thô bất kỳ (test/retry-failed) mà
+            // không phát warning "Undefined array key" trên PHP 8.
+            $isFolder = $child['isFolder'] ?? ($child['mimeType'] === 'application/vnd.google-apps.folder');
+            $child['isFolder'] = $isFolder;
+            if (! $isFolder) {
+                $exportSpec = self::EXPORT_MAP[$child['mimeType']] ?? null;
+                if ($exportSpec) {
+                    $name .= '.' . $exportSpec['ext'];
+                }
+            }
+            // reserve=0: PHP ghi thẳng vào $targetLocalPath (KHÔNG qua file tạm — xem docblock đầu
+            // file mục 3 "KHÔNG tạo file .bak/.old/.tmp"), nên không cần chừa byte cho bất kỳ hậu tố
+            // tạm nào (khác bản Go, nơi tempDownloadPath() có tên tạm ĐỘ DÀI CỐ ĐỊNH riêng của nó).
+            $name = self::truncateNameComponent($name, 0);
+
+            $key = mb_strtolower($name);
+            $collided = isset($used[$key]);
+            if ($collided) {
+                $name = self::disambiguateLocalName($name, (string) $child['id'], $used);
+            }
+            $used[mb_strtolower($name)] = true;
+
+            $resolved[] = $child + ['localName' => $name, 'collided' => $collided];
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * Chèn (dần nới rộng) Drive file ID của item ĐỤNG HÀNG vào trước phần mở rộng cho tới khi kết
+     * quả không trùng ai trong $used. Bắt đầu 8 ký tự (khớp convention hậu tố cũ của tool —
+     * "file.pdf" → "file_1JP7CIBW.pdf"); chỉ nới rộng khi 8 ký tự đầu ID CŨNG đụng (cực hiếm), và
+     * fallback bộ đếm số nếu cả ID đầy đủ cũng đụng (Drive ID vốn unique nên nhánh này không thể
+     * xảy ra thật — tồn tại chỉ để chứng minh vòng lặp CHẮC CHẮN dừng).
+     */
+    private static function disambiguateLocalName(string $name, string $id, array $used): string
+    {
+        $idLen = strlen($id);
+        // Bắt đầu ở min(8, $idLen), KHÔNG phải 8 cứng: một ID ngắn hơn 8 ký tự làm vòng lặp
+        // không chạy lần nào và rơi thẳng xuống nhánh bộ đếm bên dưới — tên nhận hậu tố xấu
+        // ("_ID-2") dù nhánh ID hoàn toàn đủ dùng. (Bắt được khi review port PHP 2026-07-19;
+        // bản Go có y hệt khiếm khuyết này và đã sửa cùng lúc.)
+        for ($n = min(8, $idLen); $n <= $idLen; $n += 4) {
+            $candidate = self::withIdSuffix($name, $id, $n);
+            if (! isset($used[mb_strtolower($candidate)])) {
+                return $candidate;
+            }
+        }
+        for ($i = 2; ; $i++) {
+            // Bộ đếm phải nằm TRƯỚC phần mở rộng như mọi hậu tố khác — nối vào cuối tên sẽ ra
+            // "bao cao_ID.pdf-2", tức file mất luôn đuôi .pdf và OS/Explorer không còn nhận ra
+            // kiểu file nữa. (Cùng đợt review 2026-07-19.)
+            $candidate = self::withSuffixBeforeExt($name, '_' . $id . '-' . $i);
+            if (! isset($used[mb_strtolower($candidate)])) {
+                return $candidate;
+            }
+        }
+    }
+
+    private static function withIdSuffix(string $name, string $id, int $n): string
+    {
+        return self::withSuffixBeforeExt($name, '_' . substr($id, 0, min($n, strlen($id))));
+    }
+
+    /**
+     * Chèn $suffix vào NGAY TRƯỚC phần mở rộng của $name rồi cap lại về trần 255 byte.
+     * Dùng chung cho mọi kiểu hậu tố chống trùng (ID rút gọn, ID đầy đủ, bộ đếm) để không
+     * chỗ nào lỡ tay nối ra sau đuôi file.
+     */
+    private static function withSuffixBeforeExt(string $name, string $suffix): string
+    {
+        $ext = pathinfo($name, PATHINFO_EXTENSION);
+        $ext = $ext !== '' ? '.' . $ext : '';
+        $base = $ext !== '' ? substr($name, 0, strlen($name) - strlen($ext)) : $name;
+
+        return self::truncateNameComponent($base . $suffix . $ext, 0);
     }
 
     /**

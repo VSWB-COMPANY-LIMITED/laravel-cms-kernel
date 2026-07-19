@@ -148,6 +148,35 @@ Google Docs/Sheets/Slides are automatically converted to Office formats:
 - **Google Slides** $\rightarrow$ `.pptx`
 - **Note:** Files exceeding Google's export limit (e.g., Sheets > 100MB) will be skipped with an error log.
 
+### Name Safety & Collision Handling (Service Account mode)
+Drive allows almost any name a filesystem doesn't — forbidden characters, names differing only
+by case, `/`/`..` inside a name, names over 255 bytes. Every direct child's local name is made
+safe before anything is written to disk:
+- Characters NTFS refuses (`< > : " | ? * \ /`) and control characters are replaced with `_`;
+  trailing dots/spaces are trimmed; Windows-reserved device names (`CON`, `PRN`, `COM1-9`,
+  `LPT1-9`…) get `_` appended (e.g. `CON.txt` → `CON_.txt`).
+- Each name is capped at **255 UTF-8 bytes**, cut only on a character boundary (Vietnamese
+  diacritics are never split), with a short hash appended when a real cut happens so two
+  different long names never collapse onto the same truncated one.
+- **Name collisions are resolved at listing time**, as ONE shared namespace across files AND
+  folders in the same parent — a folder and a file with the same Drive name collide just as much
+  as two files do, and the destination filesystem (NTFS/APFS) is case-insensitive by default so
+  `Report.pdf` and `report.pdf` collide too, even though Drive treats them as different files.
+  Decision order is by **Drive file ID, ascending** — never by `files.list` response order (Drive
+  does not guarantee that's stable) — so the same set of Drive items always produces the same
+  local names. The loser of a collision gets the first 8 characters of its file ID appended
+  before the extension (e.g. `report.pdf` → `report_1JP7CIBW.pdf`).
+- Every resolved local path is re-validated against `--path` immediately before any
+  directory/file is created — defense-in-depth against a Drive item name containing `/` or `..`
+  that could otherwise write outside the destination directory.
+- Because this tool **never deletes local files**, upgrading to this behavior leaves any
+  previously-mirrored file under its old (unsafe) name in place and downloads the new,
+  sanitized name alongside it — a duplicate, not data loss. Only files whose Drive name actually
+  needed sanitizing are affected.
+
+(Same rules — mirrored 1:1 in a standalone, cross-platform Go CLI at `tools/gdrive-mirror-cli/`
+for machines without PHP; see that tool's `README.md` for the full write-up.)
+
 ### Programmatic Usage
 ```php
 use Illuminate\Support\Facades\Storage;

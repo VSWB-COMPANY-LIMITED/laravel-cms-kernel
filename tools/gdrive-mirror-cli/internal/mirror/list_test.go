@@ -162,3 +162,27 @@ func TestResolveSiblingNames_ThreeWayCollisionAllDistinct(t *testing.T) {
 		seen[key] = true
 	}
 }
+
+// A Drive ID shorter than the 8-char suffix window used to skip the ID branch
+// of disambiguate() entirely and fall through to the numeric-counter branch,
+// which additionally appended the counter AFTER the extension — yielding
+// "bao cao_BBBB222.pdf-2", a file with no usable extension left. Caught while
+// reviewing the PHP port (2026-07-19); both ports shared the defect.
+func TestResolveSiblingNames_ShortIDKeepsExtension(t *testing.T) {
+	resolved := resolveSiblingNames([]rawChild{
+		{id: "AAAA111", name: "bao cao.pdf", mimeType: "application/pdf"},
+		{id: "BBBB222", name: "Bao Cao.pdf", mimeType: "application/pdf"},
+	})
+
+	for _, r := range resolved {
+		if !strings.HasSuffix(r.localName, ".pdf") {
+			t.Errorf("id=%s lost its extension: %q", r.id, r.localName)
+		}
+		if strings.Contains(r.localName, "-2") {
+			t.Errorf("id=%s fell through to the counter branch unnecessarily: %q", r.id, r.localName)
+		}
+	}
+	if resolved[0].localName == resolved[1].localName {
+		t.Fatalf("names not deduped: %q", resolved[0].localName)
+	}
+}

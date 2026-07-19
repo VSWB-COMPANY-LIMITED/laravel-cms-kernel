@@ -3,6 +3,72 @@
 ## [Unreleased]
 
 ### Fixed
+- **[GDriveMirrorSync + gdrive-mirror-cli] Hậu tố chống trùng: ID ngắn và bộ đếm dự phòng.**
+  Bắt được khi review port PHP (2026-07-19) — khiếm khuyết có ở CẢ hai bản, đã sửa đồng bộ:
+  - vòng dò hậu tố bắt đầu ở `8` cứng nên ID Drive ngắn hơn 8 ký tự làm nhánh ID không chạy lần
+    nào, rơi thẳng xuống nhánh bộ đếm dự phòng → `min(8, strlen($id))`;
+  - nhánh bộ đếm nối `-2` vào SAU phần mở rộng (`bao cao_ID.pdf-2`) → file mất đuôi `.pdf` và
+    không còn mở được theo association. Gom về một hàm `withSuffixBeforeExt()` dùng chung cho
+    mọi kiểu hậu tố để không call site nào nối ra sau đuôi được nữa.
+  Có test hồi quy ở cả hai bản (`GDriveResolveSiblingNamesTest`, `list_test.go`).
+- **[GDriveMirrorSync] Port bộ fix C1-C5/L1-L3 (trùng tên + an toàn tên file mọi OS) từ bản Go
+  `tools/gdrive-mirror-cli` (commit `2dc0969`) sang `GDriveMirrorSync.php`.**
+  Bản PHP (chế độ Service Account/Drive API — `fetchFolderChildrenViaApi()`) từng có 8 lỗi:
+  - **C1** — 2 file Drive khác nhau chỉ khác hoa/thường bị NTFS/APFS coi là 1 file → ghi đè mất
+    dữ liệu im lặng (`$usedLocalPaths` so khớp phân biệt hoa-thường).
+  - **C2** — file và folder trùng tên cùng cha → file ghi đè lên thư mục → fail mãi mãi.
+  - **C3** — 2 folder trùng tên → nội dung 2 cây con Drive gộp lẫn lộn im lặng.
+  - **C4** — hậu tố chống trùng gán theo THỨ TỰ Drive trả về (không đảm bảo ổn định giữa 2 lần
+    gọi) → Drive đổi thứ tự là sinh bản sao rác vô hạn (tool không bao giờ xoá file local).
+  - **L1** — không giới hạn 255 byte/component (giới hạn cứng NTFS); đuôi export + hậu tố chống
+    trùng cộng thêm mà không kiểm tra.
+  - **L2** — ký tự Windows cấm (`< > : " | ? * \ /`) không được lọc khỏi tên Drive.
+  - **L3** — tên thiết bị Windows dành riêng (`CON`, `PRN`, `COM1-9`, `LPT1-9`…) không bị chặn.
+  - **C5** — Drive cho phép `/` và `..` trong tên → nối chuỗi trần (`"{$baseLocalPath}/{$syncPath}"`)
+    có thể ghi RA NGOÀI thư mục đích.
+
+  **Fix:**
+  1. Thêm 3 static pure helper (port 1:1 `internal/localpath/localpath.go`): `sanitizeNameComponent()`
+     (lọc ký tự cấm/control + trim dấu chấm-space cuối + chặn tên reserved), `truncateNameComponent()`
+     (cap 255 BYTE UTF-8, cắt đúng ranh giới ký tự, hash chống đụng khi cắt thật — kèm fix bẫy
+     `pathinfo(PATHINFO_EXTENSION)` lấy dấu chấm CUỐI làm "extension" khiến tên kiểu VN
+     `"Bao cao Q1.2026 - <text dài>"` giữ nguyên đuôi dài verbatim và VƯỢT trần 255 byte), và
+     `safeJoinLocalPath()` (nối + xác thực path nằm trong root, chuẩn hoá bằng logic CHUỖI THUẦN
+     vì `realpath()` trả `false` khi path chưa tồn tại).
+  2. Tách `fetchFolderChildrenViaApi()` thành `collectRawChildrenViaApi()` (gom đủ mọi trang con
+     TRỰC TIẾP trước, giữ nguyên `withRetry()`/BUG A-1/BUG B) + `resolveSiblingNames()` (dedup
+     THUẦN, chung 1 namespace file+folder, khoá theo Drive file ID TĂNG DẦN — không theo thứ tự
+     `files.list` trả về) — tên collision giờ quyết định SAU KHI đã thấy đủ tập anh em, ổn định
+     bất kể Drive trả về theo thứ tự nào.
+  3. `handle()`: bỏ khối "Handle Name Collisions" cũ (đổi tên bằng cách nối 8 ký tự ID theo thứ
+     tự gặp trong vòng lặp chính) — dedup thật đã chuyển lên tầng listing. `$usedLocalPaths` giữ
+     lại làm LỚP PHÒNG THỦ: còn đụng ở đây tức bug tầng trên → log ERROR + `failed_files`
+     (permanent), KHÔNG âm thầm đổi tên/ghi đè. `$absoluteLocalPath` dùng `safeJoinLocalPath()`
+     thay nối chuỗi trần — bị từ chối thì permanent, KHÔNG tính vào circuit breaker ổ đĩa.
+     `$localPrefix` (tên folder gốc) cũng qua sanitize+truncate.
+  4. `classifyDriveError()`/`isLocalFsError()`: thêm `isInvalidLocalName()` (nhận diện
+     `ENAMETOOLONG`/EINVAL kèm path tuyệt đối/lỗi `safeJoinLocalPath()`) — gọi SỚM NHẤT, luôn
+     permanent, và luôn KHÔNG được tính là bằng chứng ổ đĩa cục bộ hỏng (nguyên tắc bất đối xứng
+     giống `isLocalFsError()`: đoán nhầm "ổ hỏng" ABORT OAN cả run, nặng hơn đoán nhầm "lỗi tên").
+
+  **Khác bản Go về kiến trúc** (không port nguyên văn, xử lý riêng — xem báo cáo triển khai):
+  - Bản Go ghi file qua temp-file có tên ĐỘ DÀI CỐ ĐỊNH (`tempDownloadPath()`) rồi rename — bản
+    PHP vốn đã KHÔNG dùng temp-file (`streamDownloadViaApi()`/`File::put()` ghi thẳng vào đích,
+    đúng docblock "KHÔNG tạo file .bak/.old/.tmp"), nên không có gì cần sửa cho phần này; trần
+    255 byte của `truncateNameComponent(..., reserve: 0)` đã đủ vì không có hậu tố tạm nào phải
+    chừa chỗ.
+  - Bản PHP có nhánh "Deep Check" (`files->get()` lấy lại mimeType khi listing thiếu/generic) mà
+    bản Go không có — nếu Deep Check phát hiện exportSpec KHÁC với cái `resolveSiblingNames()` đã
+    dùng ở tầng listing, `handle()` vẫn append đuôi export CÓ ĐIỀU KIỆN (chỉ khi tên hiện tại
+    CHƯA có đúng đuôi) để không mất phần mở rộng ở ca hiếm này.
+
+  Test: `tests/Unit/GDriveLocalPathTest.php` (19 test — sanitize/truncate/safeJoin, bao gồm bẫy
+  `pathinfo` đuôi dài), `tests/Unit/GDriveResolveSiblingNamesTest.php` (10 test — C1/C2/C3/C4 +
+  Google-native export ext + sanitize-before-dedup), `tests/Unit/GDriveInvalidLocalNameTest.php`
+  (10 test — `isInvalidLocalName()` + tích hợp `classifyDriveError()`/`isLocalFsError()`). Đã
+  sanity-check: tạm revert case-folding trong `resolveSiblingNames()` → test C1 đỏ đúng như kỳ
+  vọng (RULE #0.0), rồi khôi phục lại.
+
 - **[GDriveMirrorSync] Preflight ghi-thử THẬT (`writeProbe()`) thay `is_writable()`.**
   Sự cố THẬT 2026-07-18 (run `7fe28ffb`, mirror folder `HopDong_KhachHang/2026`): ổ exFAT ngoài
   `/Volumes/WD-DATA1` hỏng I/O — `is_writable()` báo `true` nhưng `mkdir`/ghi thật ném

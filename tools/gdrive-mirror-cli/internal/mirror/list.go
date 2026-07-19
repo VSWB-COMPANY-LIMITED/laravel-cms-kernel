@@ -261,14 +261,25 @@ func resolveSiblingNames(children []rawChild) []resolvedChild {
 // so this branch is unreachable in practice — it exists only so the loop is
 // provably terminating).
 func disambiguate(name string, id string, used map[string]bool) string {
-	for n := 8; n <= len(id); n += 4 {
+	// Start at min(8, len(id)), not a hard 8: an ID shorter than 8 chars made
+	// this loop run zero times and drop straight through to the counter branch
+	// below, producing an ugly "_ID-2" name when the ID branch would have done
+	// fine. (Caught reviewing the PHP port, 2026-07-19; both ports had it.)
+	start := 8
+	if len(id) < start {
+		start = len(id)
+	}
+	for n := start; n <= len(id); n += 4 {
 		candidate := withIDSuffix(name, id, n)
 		if !used[strings.ToLower(candidate)] {
 			return candidate
 		}
 	}
 	for i := 2; ; i++ {
-		candidate := withIDSuffix(name, id, len(id)) + fmt.Sprintf("-%d", i)
+		// The counter belongs BEFORE the extension like every other suffix —
+		// appending it to the end produced "bao cao_ID.pdf-2", i.e. a file that
+		// lost its .pdf extension entirely and no longer opens by association.
+		candidate := withSuffixBeforeExt(name, "_"+id+fmt.Sprintf("-%d", i))
 		if !used[strings.ToLower(candidate)] {
 			return candidate
 		}
@@ -279,10 +290,17 @@ func withIDSuffix(name, id string, n int) string {
 	if n > len(id) {
 		n = len(id)
 	}
+	return withSuffixBeforeExt(name, "_"+id[:n])
+}
+
+// withSuffixBeforeExt inserts suffix immediately before name's extension and
+// re-caps the result at the 255-byte limit. Shared by every disambiguation
+// suffix (short ID, full ID, counter) so no call site can accidentally append
+// past the extension.
+func withSuffixBeforeExt(name, suffix string) string {
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
-	suffixed := base + "_" + id[:n] + ext
-	return localpath.TruncateComponent(suffixed, 0)
+	return localpath.TruncateComponent(base+suffix+ext, 0)
 }
 
 func itemType(isFolder bool) string {
