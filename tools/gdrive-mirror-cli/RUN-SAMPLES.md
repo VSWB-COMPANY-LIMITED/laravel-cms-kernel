@@ -53,6 +53,59 @@ Select-String client_email .\creds.json
 
 Dùng exit code này cho cron/scheduler để cảnh báo.
 
+### 0.5 Tool chạy 2 GIAI ĐOẠN — đọc kỹ để không hiểu nhầm khi nhìn log
+
+```
+Giai đoạn 1: LIỆT KÊ toàn bộ cây trên Drive (đệ quy, mỗi thư mục ≥1 API request)
+             → cây to (hàng nghìn thư mục) chạy NHIỀU PHÚT là bình thường
+             → trong lúc này KHÔNG tải/ghi file nào; chỉ in các dòng WARN "Trùng tên"
+             → kết thúc bằng dòng:  Found N item(s).
+Giai đoạn 2: TẢI file (lúc này mới đụng ổ đĩa)
+             → mở màn bằng dòng:   Starting synchronization of X file(s)...
+```
+
+**Chưa thấy `Found N item(s).` = còn đang liệt kê, chưa tới lúc tải — cứ để chạy tiếp.**
+Đừng tưởng tool treo khi thấy im lặng lâu / chỉ toàn WARN.
+
+#### `--limit=N` đếm ITEM, không phải N file
+
+- `--limit` áp **SAU khi liệt kê xong toàn bộ cây** (cố ý — để shrink-guard [README.md](README.md)
+  không hiểu nhầm cây bị teo). Nó **không** làm giai đoạn 1 nhanh hơn.
+- "N item đầu" = N mục đầu theo **thứ tự duyệt sâu (depth-first), trộn lẫn cả thư mục lẫn
+  file**. Thư mục chỉ được mkdir, không tải gì. Ví dụ cây `folder-a / sub-1 / file-x,
+  file-y` → `--limit=5` lấy: `folder-a`, `sub-1`, `file-x`, `file-y`, … — tải được ít
+  file hơn N, thậm chí 0 file nếu đầu cây toàn thư mục lồng nhau.
+- Số file THẬT sẽ tải nằm ở dòng `Starting synchronization of X file(s)...` — nhìn X,
+  đừng nhìn N.
+- **Muốn test "tải thử vài file" đúng nghĩa:** đừng dùng `--limit` trên root to — mở Drive,
+  vào một **thư mục con nhỏ** có sẵn file, copy ID từ URL và chạy với ID đó (liệt kê xong
+  trong vài giây, thấy file về ngay). `--limit` chỉ hữu ích để chặn khối lượng, không phải
+  để chọn đúng N file.
+
+#### WARN `Trùng tên trong '...'` nghĩa là gì (và vì sao lần chạy nào cũng thấy lại)
+
+- Cảnh báo này so sánh **các file trên Drive với nhau trong cùng 1 thư mục** — hoàn toàn
+  KHÔNG liên quan file đã tải/convert ở lần chạy trước (giai đoạn 1 không hề nhìn ổ đĩa).
+- Nó bắn ra khi **2 file KHÁC NHAU trên Drive** sẽ cho ra **cùng 1 tên local** — 2 nguồn:
+  1. Drive cho phép 2 file trùng tên y hệt nằm cùng thư mục (filesystem thì không);
+  2. tên chỉ khác nhau ở ký tự bị sanitize (vd `Th09-Th10:2021.pdf` và
+     `Th09-Th10_2021.pdf` — dấu `:` cấm trên Windows nên đổi thành `_` → đụng nhau).
+- Nếu không đổi tên thì một trong hai file **bị ghi đè mất im lặng** → tool tự gắn hậu tố
+  `_<8 ký tự đầu Drive ID>` cho bản đến sau (deterministic — lần nào chạy cũng ra đúng tên
+  đó, không đẻ thêm bản mới) + in WARN để bạn biết.
+- WARN lặp lại mỗi run chừng nào **cặp trùng còn tồn tại trên Drive** — nó tường thuật
+  hiện trạng Drive. Muốn hết WARN: dọn gốc trên Drive (xoá bớt 1 bản trong cặp — nên so
+  md5/nội dung trước khi xoá).
+- Chạy lại tool KHÔNG bao giờ tự sinh cảnh báo trùng tên: file đã có trên đĩa thì so
+  md5/mtime → skip hoặc ghi đè đúng file cũ, không tạo "file (2)".
+
+#### `--concurrency=N` là gì
+
+Số file được **tải song song cùng lúc** (worker pool). Chỉ áp cho giai đoạn 2 (tải),
+không ảnh hưởng tốc độ giai đoạn 1 (liệt kê). To hơn = nhanh hơn nếu mạng/ổ đích chịu
+được; quá to trên HDD/USB chậm hoặc mạng yếu → dễ lỗi I/O, timeout, bị Drive throttle.
+Khuyến nghị: SSD + mạng nhanh `8`; HDD/USB hoặc mạng yếu `2`–`4`; đang test `1`–`2`.
+
 ---
 
 ## 1. macOS
@@ -97,7 +150,7 @@ cd ~/gdrive-sync
 Mục đích: xác nhận **auth OK + thấy đúng thư mục** trước khi ghi bất cứ thứ gì.
 Dry-run **bỏ qua preflight write-probe** nên không cần ổ đích sẵn sàng.
 
-### 1.4 Bước 2 — tải thử 5 file
+### 1.4 Bước 2 — chạy thử giới hạn (`--limit=5` = 5 ITEM đầu, không phải 5 file — xem §0.5)
 
 ```bash
 ./gdrive-mirror 0Bw6yYZTQJcm3aGoxTGJuY1p1ZU0 \
@@ -229,7 +282,7 @@ gdrive-mirror 0Bw6yYZTQJcm3aGoxTGJuY1p1ZU0 \
   --dry-run
 ```
 
-### 2.4 Bước 2 — tải thử 5 file
+### 2.4 Bước 2 — chạy thử giới hạn (`--limit=5` = 5 ITEM đầu, không phải 5 file — xem §0.5)
 
 ```bash
 gdrive-mirror 0Bw6yYZTQJcm3aGoxTGJuY1p1ZU0 \
@@ -363,7 +416,7 @@ cd C:\Tools\gdrive
 > Backtick `` ` `` là ký tự nối dòng của PowerShell. Đường dẫn có dấu cách → **bắt buộc
 > bọc nháy kép**: `--path="D:\Sao luu\GDrive"`.
 
-### 3.3 PowerShell — bước 2: tải thử 5 file
+### 3.3 PowerShell — bước 2: chạy thử giới hạn (`--limit=5` = 5 ITEM đầu, không phải 5 file — xem §0.5)
 
 ```powershell
 .\gdrive-mirror.exe 0Bw6yYZTQJcm3aGoxTGJuY1p1ZU0 `

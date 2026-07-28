@@ -55,8 +55,8 @@ gdrive-mirror --retry-failed=<report.json|dir> --path=<local_dir> [flags]
 | `--retry`              | `3`                                                              | Retries per file operation on network failure   |
 | `--force`              | `false`                                                          | Re-download everything (safe: never deletes)    |
 | `--dry-run`            | `false`                                                          | List first 20 items only, no download           |
-| `--limit`              | `0` (all)                                                        | Only process the first N items — testing        |
-| `--concurrency`        | `4`                                                               | Concurrent file downloads (goroutine pool)       |
+| `--limit`              | `0` (all)                                                        | Only process the first N **items** (folders + files mixed, depth-first order — folders just get mkdir, so actual downloads ≤ N, possibly 0). Applied AFTER the full recursive listing finishes — it does NOT speed up the listing phase. For a quick "download a few files" test, point the tool at a small subfolder ID instead. See RUN-SAMPLES §0.5 |
+| `--concurrency`        | `4`                                                               | Concurrent file downloads (goroutine pool, download phase only). SSD + fast network: `8`; slow HDD/USB or weak network: `2`–`4` |
 | `--retry-failed`       | *(unset)*                                                        | Path to a `failed-*.json` report (or its directory — newest picked) — retries only its items, no fresh listing |
 | `--include-permanent`  | `false`                                                          | With `--retry-failed`, also retry items marked `permanent` (default: skipped — they cannot self-heal) |
 | `--ignore-shrink`      | `false`                                                          | Skip the listing shrink-guard abort — only when you deliberately deleted a lot on Drive (PHP source's equivalent flag is `--allow-shrink`) |
