@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **[Kernel API] Fix public CMS plugin endpoint `/api/v1/cms/plugins/get-plugins` returning HTML dump.** The controller accidentally called `dd(get_active_plugins())`, causing a 500 error and dumping plugin data as HTML. Now it returns a safe JSON payload with `active_plugins`.
 - **[GDriveMirrorSync] Ghi file ATOMIC (write-then-rename) — bản PHP từng kém an toàn hơn bản
   Go.** Trước đây PHP ghi THẲNG vào file đích (`streamDownloadViaApi()`, nhánh export Google
   Native `File::put()`, nhánh stream thường `fopen('w')`) — crash/mất mạng/rút ổ giữa chừng để

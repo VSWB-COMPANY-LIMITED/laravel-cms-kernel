@@ -124,6 +124,8 @@ class KernelController extends BaseController
 
     public function getPlugins(Request $request): JsonResponse
     {
-        dd(get_active_plugins());
+        return response()->json([
+            'active_plugins' => get_active_plugins(),
+        ], 200);
     }
 }
