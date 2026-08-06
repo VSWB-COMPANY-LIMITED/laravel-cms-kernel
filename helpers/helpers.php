@@ -446,10 +446,57 @@ if (!function_exists('apps_google_sheet')) {
 
                     $connection = $connection['connection'];
                     // Log::channel($logger)->info("Connection captured", $connection);
-                    $accessToken = [
-                        'access_token' => $connection['provider_exchange_token'],
-                        'refresh_token' => $connection['provider_exchange_refresh_token'],
-                    ]; // $accessToken = json_decode(file_get_contents(storage_path('app/google-oauth2-tokens.json')), true);
+
+                    // [FIX 2026-08-06] OAuth access token PHẢI kèm expires_in/created. Nếu chỉ có
+                    // access_token + refresh_token (như code cũ), Google\Client::isAccessTokenExpired()
+                    // LUÔN trả true → Revolution SheetsClient::setAccessToken() gọi
+                    // fetchAccessTokenWithRefreshToken() MỖI lần → mỗi ghi Sheet phát sinh 1 request
+                    // thừa tới oauth2.googleapis.com/token. Khi sync ồ ạt (nhiều worker) → Google
+                    // throttle ở tầng TLS (sslv3 alert handshake failure) → ghi Sheet fail rải rác.
+                    // Fix: refresh ĐÚNG MỘT LẦN rồi CACHE token đầy đủ (kèm expires_in) theo refresh_token,
+                    // tái dùng tới gần hết hạn. Generic cho mọi project dùng helper này (đọc config google.*
+                    // — cùng client_id/secret mà Revolution Sheets vốn dùng để refresh). Có fallback về
+                    // hành vi cũ nếu thiếu refresh_token / config / refresh lỗi → không bao giờ tệ hơn trước.
+                    $refreshToken = (string) ($connection['provider_exchange_refresh_token'] ?? '');
+                    $legacyToken = [
+                        'access_token' => $connection['provider_exchange_token'] ?? null,
+                        'refresh_token' => $refreshToken,
+                    ];
+
+                    if (blank($refreshToken)) {
+                        $accessToken = $legacyToken; // không refresh được → giữ nguyên như cũ
+                    } else {
+                        $oauthCacheKey = 'apps_google_sheet:oauth2_token:' . sha1($refreshToken);
+                        $accessToken = Cache::get($oauthCacheKey);
+
+                        if (blank($accessToken) || blank($accessToken['access_token'] ?? null)) {
+                            try {
+                                $oauthClient = new Client();
+                                $oauthClient->setClientId((string) config('google.client_id'));
+                                $oauthClient->setClientSecret((string) config('google.client_secret'));
+                                $fresh = $oauthClient->fetchAccessTokenWithRefreshToken($refreshToken);
+
+                                if (empty($fresh['error']) && !empty($fresh['access_token'])) {
+                                    // Google thường KHÔNG trả lại refresh_token khi refresh → giữ token gốc.
+                                    $fresh['refresh_token'] = $fresh['refresh_token'] ?? $refreshToken;
+                                    // created bảo đảm có để isAccessTokenExpired() tính đúng hạn.
+                                    $fresh['created'] = $fresh['created'] ?? time();
+                                    // buffer 120s: evict sớm để không dùng token sát hạn.
+                                    $oauthTtl = max(60, (int) ($fresh['expires_in'] ?? 3600) - 120);
+                                    Cache::put($oauthCacheKey, $fresh, $oauthTtl);
+                                    $accessToken = $fresh;
+                                } else {
+                                    Log::channel($logger)->warning(__FUNCTION__ . ": oauth2 refresh returned no access_token, fallback to legacy token", (array) ($fresh['error'] ?? 'unknown'));
+                                    $accessToken = $legacyToken;
+                                }
+                            } catch (\Throwable $e) {
+                                Log::channel($logger)->warning(__FUNCTION__ . ": oauth2 token refresh/cache failed, fallback to legacy token: " . $e->getMessage());
+                                $accessToken = $legacyToken;
+                            }
+                        }
+                    }
+                    // $accessToken giờ có expires_in+created (từ cache/refresh) → Sheets::setAccessToken()
+                    // KHÔNG refresh lại cho tới khi token thật hết hạn.
                     #endregion
                 } else { // using non-laravel style
                     #region Setup Google Client & Service Account

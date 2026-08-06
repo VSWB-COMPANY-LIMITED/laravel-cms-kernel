@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Fixed
+- **[apps_google_sheet / OAuth2] Cache access token thay vì refresh MỖI lần ghi Sheet.** Nhánh
+  `oauth2` dựng `$accessToken` chỉ gồm `access_token` + `refresh_token`, THIẾU `expires_in`/`created`
+  → `Google\Client::isAccessTokenExpired()` luôn trả `true` → `Revolution SheetsClient::setAccessToken()`
+  gọi `fetchAccessTokenWithRefreshToken()` ở MỖI lần gọi Sheets → mỗi ghi Sheet = 1 request thừa tới
+  `oauth2.googleapis.com/token`. Khi sync ồ ạt (nhiều worker) → Google throttle tầng TLS
+  (`sslv3 alert handshake failure`) → ghi Sheet fail rải rác. **Fix:** refresh ĐÚNG MỘT LẦN qua
+  `Google\Client` (config `google.client_id`/`client_secret`) rồi CACHE token đầy đủ (kèm `expires_in`+`created`)
+  theo khóa `sha1(refresh_token)`, TTL = `expires_in − 120s`, tái dùng tới gần hết hạn → cắt ~50% request
+  tới Google, hết throttle. Generic cho mọi project dùng helper. Có fallback về hành vi cũ nếu thiếu
+  `refresh_token`/config/refresh lỗi (không bao giờ tệ hơn trước). File: `helpers/helpers.php` (nhánh oauth2).
 - **[Kernel API] Fix public CMS plugin endpoint `/api/v1/cms/plugins/get-plugins` returning HTML dump.** The controller accidentally called `dd(get_active_plugins())`, causing a 500 error and dumping plugin data as HTML. Now it returns a safe JSON payload with `active_plugins`.
 - **[GDriveMirrorSync] Ghi file ATOMIC (write-then-rename) — bản PHP từng kém an toàn hơn bản
   Go.** Trước đây PHP ghi THẲNG vào file đích (`streamDownloadViaApi()`, nhánh export Google
