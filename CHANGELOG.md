@@ -3,6 +3,24 @@
 ## [Unreleased]
 
 ### Fixed
+- **[Log::channel] Thay bằng `apps_log()` ở 72 chỗ trong `helpers/helpers.php`.** Gói này có HAI đường
+  ghi log và chúng KHÔNG tương đương: `apps_log($name)` đi qua `apps_log_channel()`, hàm đó **tự
+  `Config::set()` cấu hình channel nếu chưa có** nên tên nào cũng chạy; còn `Log::channel($name)`
+  **không đăng ký gì** — gặp tên lạ là ném `InvalidArgumentException: Log [x] is not defined`, Laravel
+  rơi về emergency logger và **dòng log thật bị mất**. 72 lời gọi trong helper dùng đường thứ hai, nên
+  chúng chỉ chạy được khi trong CÙNG request đã có ai đó gọi `apps_log()` với đúng tên ấy (lần gọi đó
+  đã `Config::set` hộ) — một phụ thuộc ngầm vào **thứ tự thực thi**. Đường nào gửi Telegram mà chưa
+  từng ghi log qua `apps_log()` thì nổ.
+  - Đo trên một project dùng gói này (21/08/2026): **1.316** dòng `laravel.EMERGENCY: Unable to create
+    configured logger` — `authentication` 1.251 · `messaging_message` 56 · `ai-engine-health` 7 ·
+    `gitlab-webhook` 2. Ca `authentication` đến từ listener gửi Telegram lúc đăng nhập.
+  - **KHÔNG đổi** 5 chỗ `Log::channel($channelName)`: biến đó đã đi qua `apps_log_channel()` ngay trong
+    hàm (`$channelName = $channel ? apps_log_channel($channel) : config('logging.default')`) nên vốn đã
+    an toàn. Cũng không đổi `Log::channel('daily')` nằm trong docblock.
+  - **Không có nguy cơ đệ quy**: 72 chỗ nằm ở dòng 290–2996, ngoài vùng định nghĩa `apps_log_channel()`
+    (944–980) và `apps_log()` (981–985). Các hàm đều khai trong `if (!function_exists(...))` nên không
+    được hoisted, nhưng mọi lời gọi đều nằm BÊN TRONG hàm khác — chỉ chạy sau khi file đã nạp xong.
+  - Diff thuần đổi tên: 72 insertions, 72 deletions, không dòng nào khác.
 - **[apps_google_sheet / OAuth2] Cache access token thay vì refresh MỖI lần ghi Sheet.** Nhánh
   `oauth2` dựng `$accessToken` chỉ gồm `access_token` + `refresh_token`, THIẾU `expires_in`/`created`
   → `Google\Client::isAccessTokenExpired()` luôn trả `true` → `Revolution SheetsClient::setAccessToken()`
