@@ -56,9 +56,13 @@ Dùng exit code này cho cron/scheduler để cảnh báo.
 ### 0.5 Tool chạy 2 GIAI ĐOẠN — đọc kỹ để không hiểu nhầm khi nhìn log
 
 ```
-Giai đoạn 1: LIỆT KÊ toàn bộ cây trên Drive (đệ quy, mỗi thư mục ≥1 API request)
-             → cây to (hàng nghìn thư mục) chạy NHIỀU PHÚT là bình thường
+Giai đoạn 1: LIỆT KÊ toàn bộ cây trên Drive (đệ quy, mỗi thư mục ≥1 API request,
+             CHẠY SONG SONG theo --list-concurrency, mặc định 8 folder cùng lúc)
+             → cây to (hàng nghìn thư mục) vẫn có thể mất VÀI PHÚT — nhanh hơn hẳn
+               so với liệt kê tuần tự trước đây, nhưng KHÔNG tức thời
              → trong lúc này KHÔNG tải/ghi file nào; chỉ in các dòng WARN "Trùng tên"
+               (thứ tự các dòng WARN này có thể xen kẽ do chạy song song — không sao,
+               kết quả liệt kê cuối cùng vẫn đúng thứ tự depth-first như trước)
              → kết thúc bằng dòng:  Found N item(s).
 Giai đoạn 2: TẢI file (lúc này mới đụng ổ đĩa)
              → mở màn bằng dòng:   Starting synchronization of X file(s)...
@@ -66,6 +70,10 @@ Giai đoạn 2: TẢI file (lúc này mới đụng ổ đĩa)
 
 **Chưa thấy `Found N item(s).` = còn đang liệt kê, chưa tới lúc tải — cứ để chạy tiếp.**
 Đừng tưởng tool treo khi thấy im lặng lâu / chỉ toàn WARN.
+
+**Cây rất to, chạy định kỳ (cron/Task Scheduler)?** Cân nhắc `--incremental` (xem README) — sau
+lần chạy đầu, các lần sau CHỈ hỏi Drive "có gì đổi" rồi liệt kê lại đúng phần đó thay vì toàn bộ
+giai đoạn 1 mỗi lần.
 
 #### `--limit=N` đếm ITEM, không phải N file
 
@@ -533,6 +541,49 @@ Retry cả item `permanent: true` (mặc định bị bỏ qua vì không tự k
   --include-permanent
 ```
 
+### 3.11 Nhiều folder ID — MỘT lệnh, không lặp `foreach` gọi N lần
+
+Tool nhận **nhiều `<folderID>` trong cùng một lệnh** — mỗi folder vẫn có report/state/runID
+riêng, một folder lỗi/bị shrink-guard chặn không cản các folder còn lại. Cách này thay cho việc
+lặp `foreach ($id in $ids) { .\gdrive-mirror.exe $id ... }` gọi N tiến trình riêng (mỗi tiến
+trình tự auth lại + tự dựng transport/HTTP pool riêng — tốn hơn không cần thiết):
+
+```powershell
+$folderIds = @(
+  "0Bw6yYZTQJcm3RlI4RU1VaDhSTnc", "14YEPqieYBfCtIIpQ2rakfm5E1G7VVuDl",
+  "0Bw6yYZTQJcm3QXFPUmNaVmlKWWs", "1JG-IHOBrjCqzo-x5eN1LcDFMyPBATv0z"
+  # ... toàn bộ danh sách folder ID
+)
+.\gdrive-mirror.exe @folderIds `
+  --path="D:\GDrive-Mirror" --creds="C:\Tools\gdrive\creds.json" `
+  --concurrency=8 --list-concurrency=8
+```
+
+### 3.12 🔴 KHÔNG trỏ `--path` vào thư mục OneDrive đang sync sống
+
+**Sự cố thật:** `--path="C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED"` — tool mirror
+Google Drive **thẳng vào gốc OneDrive đang đồng bộ**. Cùng file, cùng size, cùng ngày sửa, cứ mỗi
+lần chạy lại thêm MỘT bản trùng tên tăng dần trên SharePoint (`file.docx` → `file-2.docx` →
+`file-3.docx` → … → `file-21.docx`) — vì mỗi lần tool tải-lại-rồi-ghi-đè (dù nội dung giống hệt),
+OneDrive coi đó là sửa xung đột và tự đẻ bản mới thay vì hoà giải. Từ bản này, tool **từ chối
+chạy** với `--path` kiểu này (xem README "KHÔNG mirror thẳng vào thư mục cloud-sync sống").
+
+**Sửa đúng — 2 bước tách biệt:**
+
+```powershell
+# 1) Mirror Drive -> ổ LOCAL THUẦN (không phải OneDrive)
+.\gdrive-mirror.exe @folderIds `
+  --path="D:\GDrive-Mirror" --creds="C:\Tools\gdrive\creds.json" `
+  --concurrency=8 --list-concurrency=8
+
+# 2) Đẩy một-chiều sang OneDrive bằng robocopy /MIR, SAU KHI bước 1 chạy xong hẳn
+robocopy "D:\GDrive-Mirror" "C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED" /MIR /R:3 /W:5
+Write-Host "robocopy exit code: $LASTEXITCODE"   # 0-7 = thành công (xem `robocopy /?`), >=8 = lỗi
+```
+
+Có thể gộp cả 2 bước vào một script `.bat`/`.ps1` chạy theo lịch (Task Scheduler §3.9) — miễn
+là bước 2 luôn chạy SAU khi bước 1 kết thúc (không chạy song song, không xen kẽ).
+
 ---
 
 ## 4. Đọc kết quả
@@ -565,12 +616,17 @@ nghĩa là retry cũng vô ích (vd Google Forms/Sites không export được, f
 | Mạng yếu, hay rớt | `2` + `--retry=10` |
 | Đang test | `1`–`2` + `--limit=5` |
 
+`--list-concurrency` (liệt kê, mặc định `8`) là tham số RIÊNG, không cần đổi theo bảng trên — nó
+chỉ gọi API metadata nhẹ, không đụng ổ đĩa/băng thông tải file, nên thường để mặc định là đủ; chỉ
+hạ xuống nếu thấy Drive trả lỗi rate-limit (`429`/`userRateLimitExceeded`) dồn dập ở giai đoạn 1.
+
 ## 6. Xử lý sự cố nhanh
 
 | Triệu chứng | Nguyên nhân & cách xử lý |
 | --- | --- |
 | `error: no credentials file found` | Sai đường dẫn `--creds`, hoặc biến env chưa set. Kiểm tra file tồn tại và không phải thư mục. |
 | Auth OK nhưng liệt kê rỗng | Chưa share thư mục Drive cho `client_email` của service account (quyền Viewer). |
+| `preflight: --path (...) nằm trong thư mục do OneDrive/Google Drive/... đồng bộ SỐNG` | Đúng như thông báo — xem README "KHÔNG mirror thẳng vào thư mục cloud-sync sống" §3.12 ở trên. Đổi `--path` ra ổ local thuần rồi dùng `robocopy /MIR` (Windows) một bước riêng sau. |
 | Dừng ngay ở preflight | Đích không ghi được thật (ổ chưa mount / read-only / hỏng I/O). Tool ghi-thử file thật để bắt sớm — cắm lại ổ rồi chạy lại. |
 | Chạy dừng giữa chừng sau nhiều lỗi | Circuit breaker cắt sau **20 lỗi I/O local liên tiếp** — ổ đĩa có vấn đề, không phải lỗi mạng. |
 | Nhiều item `permanent` | Loại file Google không export được (Forms/Sites/Maps/Jamboard) hoặc vượt hạn mức export — xem cột `error_reason` trong CSV. |

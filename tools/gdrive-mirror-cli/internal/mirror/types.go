@@ -41,8 +41,14 @@ type Item struct {
 	// this already includes the export extension (".docx"…) when applicable.
 	// It is safe to use directly as a local path once joined with the
 	// destination root via localpath.SafeJoin.
-	Path         string
-	ID           string
+	Path string
+	ID   string
+	// ParentID is the Drive ID of the folder this item is a DIRECT child
+	// of — "" for items produced by the --retry-failed path (ItemFromFailed),
+	// which never needed it before this field existed. Only consumed by the
+	// --incremental manifest (see incremental.go); every other code path
+	// ignores it.
+	ParentID     string
 	MimeType     string
 	MD5Checksum  string // "" when Drive doesn't provide one (Google-native files)
 	ModifiedTime int64  // unix seconds
@@ -60,6 +66,37 @@ type Config struct {
 	Limit        int
 	Concurrency  int
 	IgnoreShrink bool // skip the listing shrink-guard abort (see applyShrinkGuard) — PHP's --allow-shrink
+
+	// ListConcurrency bounds how many folder-listing requests
+	// (files.list) run concurrently during the recursive listing phase
+	// (see list.go ListFolderRecursive) — independent from Concurrency
+	// (which bounds concurrent file DOWNLOADS instead): listing calls are
+	// cheap metadata-only round-trips, so this can usually run higher
+	// than the download concurrency without issue.
+	ListConcurrency int
+
+	// AllowCloudSyncPath bypasses the preflight check that refuses to run
+	// when --path resolves inside a folder a THIRD-PARTY cloud-sync
+	// client (OneDrive/Google Drive/Dropbox/iCloud desktop app) is
+	// actively watching — see cloudsync.Detect. Off by default: mirroring
+	// straight into such a folder means two independent sync engines
+	// fight over the same files, and this tool's atomic
+	// download-then-rename is exactly the pattern that makes the OTHER
+	// client mistake an unrelated-but-identical rewrite for a conflicting
+	// edit and spawn "name-2.ext", "name-3.ext"... duplicates that grow by
+	// one every run (real incident, see README "Không mirror thẳng vào
+	// thư mục cloud-sync sống").
+	AllowCloudSyncPath bool
+
+	// Incremental turns on the Drive Changes API delta-sync path (see
+	// incremental.go): once a folder has completed one full listing under
+	// --incremental, subsequent runs ask Drive "what changed since last
+	// time" instead of re-listing the entire tree, and only re-list the
+	// handful of folders that actually changed. Self-bootstrapping — the
+	// very first run for a folder (no saved manifest yet) is always a
+	// normal full listing, which also saves the manifest + a Changes API
+	// page token for the next run to use.
+	Incremental bool
 }
 
 // Stats accumulates the end-of-run summary — mutated under Syncer.mu.

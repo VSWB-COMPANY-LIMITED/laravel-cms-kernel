@@ -32,9 +32,12 @@ func run() int {
 	dryRunFlag := fs.Bool("dry-run", false, "List remote items only (first 20), do not download")
 	limitFlag := fs.Int("limit", 0, "Only process the first N items (0 = all). Useful for testing")
 	concurrencyFlag := fs.Int("concurrency", 4, "Number of files to download concurrently")
+	listConcurrencyFlag := fs.Int("list-concurrency", 8, "Number of folder-listing requests to run concurrently during the recursive listing phase (independent from --concurrency, which is for downloads)")
 	retryFailedFlag := fs.String("retry-failed", "", "Path to a failed-*.json report (or the directory containing it — newest is picked) to re-run instead of listing Drive again")
 	includePermanentFlag := fs.Bool("include-permanent", false, "With --retry-failed, also retry items marked permanent (default: skipped — they cannot self-heal)")
 	ignoreShrinkFlag := fs.Bool("ignore-shrink", false, "Skip the listing shrink-guard abort — use only when you deliberately deleted a lot of files/folders on Drive")
+	allowCloudSyncPathFlag := fs.Bool("allow-cloud-sync-path", false, "Allow --path to be inside a folder a live cloud-sync client (OneDrive/Google Drive/Dropbox/iCloud) is watching — OFF by default because this causes runaway numbered-duplicate files on the other client's side (see README)")
+	incrementalFlag := fs.Bool("incremental", false, "Use the Drive Changes API for delta sync once a folder has one full listing on record — later runs only re-list folders Drive reports as changed, instead of the whole tree. Self-bootstrapping: first run per folder is always a full listing")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s <folderID> [<folderID> ...] --path=<dir> [flags]\n", os.Args[0])
@@ -81,16 +84,22 @@ func run() int {
 	if *concurrencyFlag < 1 {
 		*concurrencyFlag = 1
 	}
+	if *listConcurrencyFlag < 1 {
+		*listConcurrencyFlag = 1
+	}
 
 	baseCfg := mirror.Config{
-		Path:         absPath,
-		CredsFile:    credsFile,
-		Retry:        *retryFlag,
-		Force:        *forceFlag,
-		DryRun:       *dryRunFlag,
-		Limit:        *limitFlag,
-		Concurrency:  *concurrencyFlag,
-		IgnoreShrink: *ignoreShrinkFlag,
+		Path:               absPath,
+		CredsFile:          credsFile,
+		Retry:              *retryFlag,
+		Force:              *forceFlag,
+		DryRun:             *dryRunFlag,
+		Limit:              *limitFlag,
+		Concurrency:        *concurrencyFlag,
+		ListConcurrency:    *listConcurrencyFlag,
+		IgnoreShrink:       *ignoreShrinkFlag,
+		AllowCloudSyncPath: *allowCloudSyncPathFlag,
+		Incremental:        *incrementalFlag,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -3,6 +3,51 @@
 ## [Unreleased]
 
 ### Fixed
+- **[gdrive-mirror-cli] `--path` trỏ vào thư mục OneDrive/Google Drive/Dropbox đang sync sống →
+  tự đẻ file trùng tên tăng dần mỗi lần chạy (sự cố thật, đã đo trên production).** `--path` được
+  trỏ thẳng vào `C:\Users\<user>\OneDrive - <org>` — mỗi lần tool tải-lại-rồi-`rename`-đè (dù nội
+  dung giống hệt: cùng size, cùng mtime), OneDrive client hiểu nhầm thành sửa xung đột đồng thời
+  và tự đẻ bản mới đánh số thay vì hoà giải (`file.docx` → `file-2.docx` → … → `file-21.docx` sau
+  ~20 lần chạy). Đây KHÔNG phải bug ở logic chống trùng tên phía Drive (`resolveSiblingNames`/
+  `disambiguate` — luôn nhúng ID hex, không sinh số trần) — nó là hai sync engine (tool này +
+  OneDrive client) cùng canh một thư mục. **Fix:** package mới `internal/cloudsync` nhận diện
+  `--path` nằm trong root một client cloud-sync đang theo dõi (qua biến môi trường
+  `OneDrive`/`OneDriveConsumer`/`OneDriveCommercial` trên Windows, hoặc qua tên đường dẫn
+  `~/Library/CloudStorage/...`/`Dropbox`/`iCloud Drive` trên macOS) và **từ chối chạy ở preflight**
+  (trước khi đụng byte nào) với thông báo giải thích + hướng dẫn dùng `robocopy /MIR` một bước
+  riêng sau khi mirror ra ổ local thuần; cờ `--allow-cloud-sync-path` để bỏ qua nếu người dùng
+  chắc chắn muốn tiếp tục. README §"KHÔNG mirror thẳng vào thư mục cloud-sync sống" +
+  RUN-SAMPLES §3.12. Test: `internal/cloudsync/cloudsync_test.go`.
+
+### Added
+- **[gdrive-mirror-cli] Song song hoá giai đoạn LIỆT KÊ Drive (`--list-concurrency`, mặc định
+  `8`).** Trước đây `ListFolderRecursive` đệ quy vào từng thư mục con TUẦN TỰ (mỗi thư mục = 1
+  request `files.list` chờ xong mới sang thư mục kế) — cây vài nghìn thư mục mất nhiều phút chỉ để
+  liệt kê, trước khi tải file đầu tiên. Nay tách thành 2 pha: fetch CONCURRENT (bounded
+  worker pool, `internal/mirror/list.go`), rồi assemble lại thứ tự depth-first THUẦN IN-MEMORY
+  (`assembleItems`) — giữ nguyên tuyệt đối hợp đồng `--limit` ("N item đầu theo thứ tự depth-first",
+  RUN-SAMPLES §0.5) bất kể goroutine chạy xong theo thứ tự nào. Test ordering-preservation:
+  `internal/mirror/list_test.go` (`TestAssembleItems_*`). Race-tested (`go test -race`).
+- **[gdrive-mirror-cli] Đồng bộ tăng-dần thật qua Drive Changes API (`--incremental`).** Trước
+  đây MỌI lần chạy đều liệt kê lại TOÀN BỘ cây rồi so delta từng file — đúng nhưng tốn cho cron
+  định kỳ trên cây lớn ít đổi. `--incremental` tự lưu một manifest (toàn bộ item đã biết) + page
+  token của Drive Changes API sau lần chạy đầu (full listing như cũ); các lần sau hỏi Drive "có gì
+  đổi kể từ token" rồi **chỉ liệt kê lại đúng những folder bị ảnh hưởng** (thêm/sửa/xoá/di chuyển
+  file, kể cả cascade khi một folder ĐANG THEO DÕI bị đổi tên/di chuyển làm path của mọi hậu duệ
+  cũ không còn khớp). Manifest/token thiếu/hỏng/Changes-API-lỗi → tự quay về liệt kê đầy đủ (không
+  bao giờ fatal), tự bootstrap lại — an toàn bật/tắt `--incremental` tuỳ ý giữa các lần chạy. File
+  mới: `internal/mirror/incremental.go` (logic thuần `computeDirtyFolders`/`mergeManifest` tách
+  riêng để unit-test không cần Drive API thật), `internal/report/incremental.go` (persist).
+  README §"Incremental sync". Test: `internal/mirror/incremental_test.go`.
+- **[gdrive-mirror-cli] Tinh chỉnh HTTP transport cho tải file đồng thời.** `MaxIdleConnsPerHost`
+  mặc định của Go chỉ là `2` — với `--concurrency`/`--list-concurrency` cao hơn, phần lớn request
+  tới `www.googleapis.com` phải bắt tay TCP+TLS lại từ đầu thay vì tái dùng kết nối rảnh. Nay
+  `internal/mirror/sync.go::newHTTPClientForDrive` tự dựng `http.Client` (đọc credentials JSON
+  qua `golang.org/x/oauth2/google` thay vì `option.WithCredentialsFile` — hai cách tương đương,
+  cách này cho phép tuỳ biến `*http.Transport` bên dưới) với `MaxIdleConnsPerHost` theo đúng mức
+  concurrency đang cấu hình.
+
+### Fixed
 - **[Log::channel] Thay bằng `apps_log()` ở 72 chỗ trong `helpers/helpers.php`.** Gói này có HAI đường
   ghi log và chúng KHÔNG tương đương: `apps_log($name)` đi qua `apps_log_channel()`, hàm đó **tự
   `Config::set()` cấu hình channel nếu chưa có** nên tên nào cũng chạy; còn `Log::channel($name)`

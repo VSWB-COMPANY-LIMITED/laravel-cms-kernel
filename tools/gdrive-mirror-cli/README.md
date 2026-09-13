@@ -57,9 +57,12 @@ gdrive-mirror --retry-failed=<report.json|dir> --path=<local_dir> [flags]
 | `--dry-run`            | `false`                                                          | List first 20 items only, no download           |
 | `--limit`              | `0` (all)                                                        | Only process the first N **items** (folders + files mixed, depth-first order — folders just get mkdir, so actual downloads ≤ N, possibly 0). Applied AFTER the full recursive listing finishes — it does NOT speed up the listing phase. For a quick "download a few files" test, point the tool at a small subfolder ID instead. See RUN-SAMPLES §0.5 |
 | `--concurrency`        | `4`                                                               | Concurrent file downloads (goroutine pool, download phase only). SSD + fast network: `8`; slow HDD/USB or weak network: `2`–`4` |
+| `--list-concurrency`   | `8`                                                               | Concurrent folder-listing requests (`files.list`) during the recursive listing phase — independent from `--concurrency` (downloads). Listing calls are cheap metadata-only round-trips, so this can usually run higher than the download concurrency. A big tree (thousands of folders) that used to take minutes to just LIST, before a single byte downloaded, now does so in roughly `1/N` the time |
+| `--incremental`        | `false`                                                           | Use the Drive Changes API for delta sync — see "Incremental sync" below. Self-bootstrapping: the first run for a folder is always a full listing (which also saves the state this needs); every run after that only re-lists folders Drive reports as changed |
 | `--retry-failed`       | *(unset)*                                                        | Path to a `failed-*.json` report (or its directory — newest picked) — retries only its items, no fresh listing |
 | `--include-permanent`  | `false`                                                          | With `--retry-failed`, also retry items marked `permanent` (default: skipped — they cannot self-heal) |
 | `--ignore-shrink`      | `false`                                                          | Skip the listing shrink-guard abort — only when you deliberately deleted a lot on Drive (PHP source's equivalent flag is `--allow-shrink`) |
+| `--allow-cloud-sync-path` | `false`                                                        | Allow `--path` to be inside a folder a live cloud-sync client (OneDrive/Google Drive/Dropbox/iCloud) is watching. OFF by default — see "Không mirror thẳng vào thư mục cloud-sync sống" below for why this is refused by default and what to do instead |
 
 One or more `<folderID>` arguments may be given — each folder is synced
 independently, sequentially, with its own local subfolder and its own
@@ -91,6 +94,89 @@ gdrive-mirror --retry-failed=/Volumes/WD-DATA1/gdrive-mirror-reports \
 Step-by-step sample commands per OS (macOS / Linux / Windows) — including
 dry-run → limited test → full run, scheduling (cron/launchd/systemd/Task
 Scheduler), and troubleshooting: **[RUN-SAMPLES.md](RUN-SAMPLES.md)**.
+
+## 🔴 KHÔNG mirror thẳng vào thư mục cloud-sync sống (OneDrive/Google Drive/Dropbox/iCloud)
+
+**Sự cố thật đã xảy ra:** `--path` được trỏ thẳng vào `C:\Users\<user>\OneDrive - <org>` (gốc
+thư mục OneDrive đang đồng bộ trên máy Windows chạy tool này). Cùng những file đó, cùng kích
+thước, cùng ngày sửa, cứ mỗi lần tool chạy lại xuất hiện thêm MỘT bản trùng tên tăng dần trên
+SharePoint (`file.docx`, `file-2.docx`, `file-3.docx`, … tới `file-21.docx` sau ~20 lần chạy) —
+dù nội dung Drive chưa hề đổi.
+
+**Vì sao:** tool này tải-vào-file-tạm-rồi-`rename`-đè-lên-đích (atomic write — đúng cách cho
+một thư mục KHÔNG ai khác đang canh). Nhưng khi `--path` nằm trong một thư mục một client
+cloud-sync KHÁC (OneDrive/Google Drive/Dropbox desktop app) cũng đang theo dõi sống, MỖI lần
+`rename` đó là một cú ghi từ bên ngoài giao thức của client kia — kể cả khi nội dung giống hệt.
+OneDrive đặc biệt phản ứng bằng cách coi đó là "sửa xung đột đồng thời" và **tự đẻ một bản mới
+đánh số** thay vì hoà giải — một bản trùng mới mỗi lần chạy, mãi mãi, dù file chưa từng thực sự
+đổi.
+
+**Vì vậy: mặc định tool TỪ CHỐI chạy** (preflight fail trước khi đụng byte nào) nếu `--path` rơi
+vào một thư mục như vậy — nhận diện qua biến môi trường client tự đặt (`OneDrive`,
+`OneDriveConsumer`, `OneDriveCommercial` trên Windows) hoặc qua tên đường dẫn
+(`~/Library/CloudStorage/...` trên macOS, `Dropbox`, `iCloud Drive`…). Xem
+`internal/cloudsync/cloudsync.go`.
+
+**Cách làm ĐÚNG — mirror ra thư mục THUẦN LOCAL trước, đẩy lên cloud bằng một bước RIÊNG sau:**
+
+```powershell
+# 1) Mirror Drive -> thư mục LOCAL THUẦN (không phải OneDrive)
+$folderIds = @("0Bw6yYZTQJcm3RlI4RU1VaDhSTnc", "14YEPqieYBfCtIIpQ2rakfm5E1G7VVuDl", ...)
+foreach ($id in $folderIds) {
+    .\gdrive-mirror.exe $id --path="D:\GDrive-Mirror" --creds="C:\Tools\gdrive\creds.json" --concurrency=8
+}
+
+# 2) Đẩy một-chiều sang OneDrive bằng robocopy /MIR — chạy SAU khi bước 1 xong hẳn,
+#    không chạy song song với bước 1 (robocopy tự so size+mtime, chỉ copy phần khác,
+#    và là một thao tác trọn vẹn — không phải N tiến trình rải rác ghi liên tục vào
+#    cùng cây như bước 1 ở trên).
+robocopy "D:\GDrive-Mirror" "C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED" /MIR /R:3 /W:5
+```
+
+**Muốn dùng MỘT lệnh cho nhiều folder ID thay vì lặp `foreach` gọi N tiến trình riêng** (tool đã
+hỗ trợ nhiều `<folderID>` trong MỘT lần gọi — mỗi folder vẫn có report/runID riêng, một folder
+lỗi không chặn các folder còn lại):
+
+```powershell
+.\gdrive-mirror.exe 0Bw6yYZTQJcm3RlI4RU1VaDhSTnc 14YEPqieYBfCtIIpQ2rakfm5E1G7VVuDl ... `
+  --path="D:\GDrive-Mirror" --creds="C:\Tools\gdrive\creds.json" --concurrency=8
+```
+
+**Nếu bạn CHẮC CHẮN muốn tiếp tục mirror thẳng vào thư mục cloud-sync bất chấp rủi ro trên** (vd
+đã tắt hẳn tính năng đồng bộ của client đó cho thư mục này), thêm `--allow-cloud-sync-path`.
+
+## Incremental sync (Drive Changes API) — `--incremental`
+
+Mặc định mỗi lần chạy đều liệt kê lại **toàn bộ** cây trên Drive rồi so delta từng file — đúng
+nhưng tốn, nhất là cho một cây hàng nghìn item chạy định kỳ (cron) mà đa số không đổi gì giữa
+hai lần chạy.
+
+`--incremental` chuyển sang dùng [Drive Changes API](https://developers.google.com/workspace/drive/api/guides/manage-changes):
+lần chạy đầu tiên cho một folder vẫn là liệt kê đầy đủ như bình thường (không có gì để so sánh),
+nhưng nó ĐỒNG THỜI lưu lại một *manifest* (toàn bộ cây đã biết) + một *page token* của Drive
+Changes API. Từ lần chạy sau, tool hỏi Drive "có gì đổi kể từ token này" thay vì liệt kê lại từ
+đầu, rồi **chỉ liệt kê lại đúng những folder Drive báo có thay đổi** — phần còn lại của cây được
+giữ nguyên từ manifest, không tốn một request nào.
+
+```bash
+# Lần đầu: liệt kê đầy đủ như bình thường + tự lưu manifest/token cho lần sau
+gdrive-mirror <folderID> --path=/Volumes/WD-DATA1/GDrive-Mirror --incremental
+
+# Các lần sau: chỉ hỏi "có gì đổi" rồi liệt kê lại đúng phần đó
+gdrive-mirror <folderID> --path=/Volumes/WD-DATA1/GDrive-Mirror --incremental
+```
+
+Trạng thái lưu tại `<path>/../gdrive-mirror-reports/incremental/<folderTag>.json` (cạnh
+`state/<folderTag>.json` của shrink-guard, xem "Reports" bên dưới). Manifest/token thiếu, hỏng,
+hoặc Changes API lỗi → tool tự quay về liệt kê đầy đủ lần đó (không bao giờ coi là lỗi fatal),
+và tự bootstrap lại state cho lần sau — an toàn để bật/tắt `--incremental` tuỳ ý giữa các lần
+chạy.
+
+**Giới hạn đã biết:** một folder ĐANG ĐƯỢC THEO DÕI mà chính nó bị đổi tên/di chuyển sẽ được xử
+lý đúng (tool tự phát hiện đường dẫn cũ trong manifest không khớp nữa và liệt kê lại đúng những
+folder bị ảnh hưởng theo tầng, không phải toàn cây) — nhưng cơ chế này thêm một số request phụ so
+với trường hợp chỉ thêm/xoá/sửa file thường. Với một cây ít khi tự đổi cấu trúc thư mục gốc (phổ
+biến cho mirror backup định kỳ), chi phí này không đáng kể.
 
 ## Behavior (ported from the PHP source — see its docblock for the full story)
 
@@ -220,6 +306,10 @@ When any item fails, reports are written to
   after a normal (non-`--dry-run`, non-`--retry-failed`) listing that the
   guard accepted; never written when the guard aborts, so a bad listing
   can't poison the next comparison.
+- `incremental/<folderTag>.json` — only with `--incremental` (see above):
+  the full known-item manifest + Drive Changes API page token the NEXT
+  `--incremental` run needs. Same "never written when the guard aborts"
+  rule as `state/` above.
 
 ## Upgrading an existing mirror (one-time, read this first)
 
@@ -247,7 +337,11 @@ one-way-never-delete is the safety property this tool is built around.
 main.go                       CLI flag parsing + multi-folder/retry-failed orchestration entrypoint
 internal/classify/            Pure error-classification + shrink-guard helpers (unit tested)
 internal/localpath/           Pure name-sanitize/truncate/safe-join helpers (unit tested)
-internal/mirror/              List/delta/download/retry/circuit-breaker/shrink-guard/worker-pool
+internal/cloudsync/           Pure detection of a --path inside a live OneDrive/Google Drive/
+                               Dropbox/iCloud-watched folder (unit tested) — see "KHÔNG mirror
+                               thẳng vào thư mục cloud-sync sống" above
+internal/mirror/               List (concurrent, list.go)/delta/download/retry/circuit-breaker/
+                               shrink-guard/worker-pool/incremental (Drive Changes API, incremental.go)
 internal/report/              Failed-item JSON/CSV/XLSX report writers, unexportable manifest,
-                               --retry-failed loader, listing-state read/write
+                               --retry-failed loader, listing-state + incremental-manifest read/write
 ```

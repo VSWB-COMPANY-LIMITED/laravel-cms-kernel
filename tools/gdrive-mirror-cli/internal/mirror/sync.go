@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,10 +17,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 
 	"github.com/vswb/gdrive-mirror/internal/classify"
+	"github.com/vswb/gdrive-mirror/internal/cloudsync"
 	"github.com/vswb/gdrive-mirror/internal/localpath"
 	"github.com/vswb/gdrive-mirror/internal/report"
 )
@@ -56,16 +60,64 @@ type fileTask struct {
 
 // New authenticates against Drive with a service-account JSON key
 // (read-only scope) and prepares a Syncer for cfg.
+//
+// Builds its own http.Client (via golang.org/x/oauth2) instead of the
+// simpler option.WithCredentialsFile(...) one-liner, specifically to get a
+// tuned *http.Transport underneath — see newHTTPClientForDrive doc. The two
+// approaches are otherwise equivalent (option.WithCredentialsFile does the
+// same JSON→TokenSource→oauth2.Transport plumbing internally; it just
+// doesn't expose the Transport to customize).
 func New(ctx context.Context, cfg Config) (*Syncer, error) {
-	srv, err := drive.NewService(ctx,
-		option.WithCredentialsFile(cfg.CredsFile),
-		option.WithScopes(drive.DriveReadonlyScope),
-	)
+	httpClient, err := newHTTPClientForDrive(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("init Drive credentials: %w", err)
+	}
+
+	srv, err := drive.NewService(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("init Drive service: %w", err)
 	}
 
 	return &Syncer{cfg: cfg, srv: srv, runID: newRunID()}, nil
+}
+
+// newHTTPClientForDrive reads cfg.CredsFile and wraps its resulting
+// oauth2.TokenSource around a *http.Transport tuned for this tool's own
+// concurrency, rather than Go's http.DefaultTransport (MaxIdleConnsPerHost
+// defaults to just 2). With --concurrency downloads and --list-concurrency
+// listings all hitting the SAME host (www.googleapis.com) at once, a
+// 2-connection idle pool forces most requests into a fresh TCP+TLS
+// handshake instead of reusing a warm connection — real, measurable
+// throughput lost on exactly the workload this tool exists for (many
+// small-to-medium file requests against one host).
+func newHTTPClientForDrive(ctx context.Context, cfg Config) (*http.Client, error) {
+	data, err := os.ReadFile(cfg.CredsFile)
+	if err != nil {
+		return nil, fmt.Errorf("read credentials file %s: %w", cfg.CredsFile, err)
+	}
+
+	creds, err := google.CredentialsFromJSON(ctx, data, drive.DriveReadonlyScope)
+	if err != nil {
+		return nil, fmt.Errorf("parse credentials file %s: %w", cfg.CredsFile, err)
+	}
+
+	perHost := cfg.Concurrency
+	if cfg.ListConcurrency > perHost {
+		perHost = cfg.ListConcurrency
+	}
+	perHost += 4 // headroom: listing + download workers can be in flight together
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = perHost
+	transport.MaxConnsPerHost = 0 // unbounded — never let the transport itself throttle below our own worker pools
+	transport.IdleConnTimeout = 90 * time.Second
+
+	return &http.Client{
+		Transport: &oauth2.Transport{
+			Source: creds.TokenSource,
+			Base:   transport,
+		},
+	}, nil
 }
 
 func newRunID() string {
@@ -84,6 +136,17 @@ func (s *Syncer) Run(ctx context.Context) (Stats, error) {
 
 	if err := s.preflight(); err != nil {
 		return s.stats, err
+	}
+
+	if s.cfg.Incremental {
+		if handled, stats, err := s.tryRunIncremental(ctx, started); handled {
+			return stats, err
+		}
+		// handled=false: no usable prior manifest (first run for this
+		// folder, corrupt state, or a Changes API failure) — fall through
+		// to the normal full listing below, which also bootstraps the
+		// manifest for the NEXT --incremental run (see the
+		// bootstrapIncrementalManifest call after the shrink guard).
 	}
 
 	// The synced folder's own name comes straight from Drive and needs the
@@ -115,6 +178,10 @@ func (s *Syncer) Run(ctx context.Context) (Stats, error) {
 		s.writeReports(reportDir, folderIDs)
 		s.printSummary(time.Since(started))
 		return s.stats, nil
+	}
+
+	if s.cfg.Incremental && !s.cfg.DryRun {
+		s.bootstrapIncrementalManifest(ctx, items, localPrefix)
 	}
 
 	return s.runTasksAndReport(ctx, items, localPrefix, folderIDs, started)
@@ -177,6 +244,31 @@ func (s *Syncer) preflight() error {
 	if s.cfg.DryRun {
 		return nil
 	}
+
+	// Checked BEFORE MkdirAll/WriteProbe below — this must fail fast,
+	// before touching the destination at all, not after it's already been
+	// created/probed. See cloudsync package doc for the real incident this
+	// guards against: mirroring straight into a live OneDrive/Google
+	// Drive/Dropbox-watched folder makes every rewrite this tool does look
+	// like a conflicting edit to the OTHER sync client, which then spawns
+	// "name-2.ext", "name-3.ext"... duplicates that grow by one every run.
+	if !s.cfg.AllowCloudSyncPath {
+		if m, ok := cloudsync.Detect(s.cfg.Path); ok {
+			basis := fmt.Sprintf("phát hiện qua tên đường dẫn (root=%s, có thể trùng ngẫu nhiên)", m.Root)
+			if m.FromEnv {
+				basis = fmt.Sprintf("khớp thư mục %s đang theo dõi qua biến môi trường (root=%s)", m.Provider, m.Root)
+			}
+			return fmt.Errorf(
+				"preflight: --path (%s) nằm trong thư mục do %s đồng bộ SỐNG — %s. "+
+					"KHÔNG mirror thẳng vào đây: mỗi lần tool tải-lại-rồi-ghi-đè (kể cả nội dung giống hệt) sẽ bị %s "+
+					"hiểu nhầm là sửa xung đột và tự đẻ bản trùng tên tăng dần (vd 'file-2.ext', 'file-3.ext'...) mỗi lần chạy. "+
+					"Hãy trỏ --path ra một thư mục THUẦN LOCAL, rồi dùng một bước copy một-chiều RIÊNG (vd `robocopy /MIR`) "+
+					"sang %s sau khi mirror xong — xem README §'Không mirror thẳng vào thư mục cloud-sync sống'. "+
+					"Nếu bạn CHẮC CHẮN muốn tiếp tục bất chấp rủi ro này, thêm --allow-cloud-sync-path",
+				s.cfg.Path, m.Provider, basis, m.Provider, m.Provider)
+		}
+	}
+
 	if err := os.MkdirAll(s.cfg.Path, 0o755); err != nil {
 		return fmt.Errorf("preflight: cannot create destination dir %s: %w", s.cfg.Path, err)
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/api/drive/v3"
@@ -12,46 +13,104 @@ import (
 	"github.com/vswb/gdrive-mirror/internal/localpath"
 )
 
+// nodeKey identifies one folder-listing unit within the tree: a Drive
+// folder ID plus the relative local path it was reached at. relativePath
+// has to be part of the key (not folderID alone) because Drive allows a
+// folder/file to have MULTIPLE PARENTS — the same folder ID could in
+// principle be reached via two different paths in a shared-drive tree, and
+// each occurrence needs its own independent listing slot.
+type nodeKey struct {
+	folderID     string
+	relativePath string
+}
+
 // ListFolderRecursive lists folderID's contents recursively via the Drive
 // API, in a shape used throughout this package (Item). Ports
 // GDriveMirrorSync::listFolderRecursiveViaApi() including the "verify on
-// zero" guard (BUG A in the PHP source): Drive's files.list occasionally
-// returns an empty page for a folder that genuinely has children (observed
-// under API pressure/rate-limiting) — a naive "0 items" reading silently
-// drops the whole subtree with zero trace. One extra request to double-check
-// a reported-empty result is far cheaper than losing a subtree silently.
+// zero" guard (BUG A in the PHP source, now inside fetchOneLevel): Drive's
+// files.list occasionally returns an empty page for a folder that
+// genuinely has children (observed under API pressure/rate-limiting) — a
+// naive "0 items" reading silently drops the whole subtree with zero
+// trace. One extra request to double-check a reported-empty result is far
+// cheaper than losing a subtree silently.
+//
+// Fetches every folder CONCURRENTLY (bounded by cfg.ListConcurrency) — each
+// folder's listing is an independent network round-trip, so a tree of N
+// folders that used to take O(N) sequential round-trips now takes roughly
+// O(N/ListConcurrency). The final []Item order is reconstructed afterwards
+// in a separate, purely in-memory pass (assembleItems) that walks the tree
+// in the EXACT same depth-first order the old fully-sequential
+// implementation produced — --limit's documented "first N items in
+// depth-first order" contract depends on this order being stable
+// regardless of fetch concurrency/network timing, so ordering must never
+// leak from goroutine scheduling.
 func (s *Syncer) ListFolderRecursive(ctx context.Context, folderID string, relativePath string) ([]Item, error) {
-	items, err := s.fetchFolderChildren(ctx, folderID, relativePath)
-	if err != nil {
-		return nil, err
+	concurrency := s.cfg.ListConcurrency
+	if concurrency < 1 {
+		concurrency = 1
 	}
-	if len(items) > 0 {
-		return items, nil
+	sem := make(chan struct{}, concurrency)
+
+	results := make(map[nodeKey][]resolvedChild)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var fatalErr error
+
+	var fetch func(key nodeKey)
+	fetch = func(key nodeKey) {
+		defer wg.Done()
+
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			mu.Lock()
+			if fatalErr == nil {
+				fatalErr = ctx.Err()
+			}
+			mu.Unlock()
+			return
+		}
+		resolved, err := s.fetchOneLevel(ctx, key.folderID, key.relativePath)
+		<-sem
+
+		mu.Lock()
+		if err != nil {
+			// Only ctx cancellation reaches here (see fetchOneLevel doc) —
+			// a genuine Drive listing error for one folder is already
+			// logged-and-degraded inside collectRawChildren (BUG B fix:
+			// must never nuke subtrees that already listed fine), so it
+			// never surfaces as an `err` here at all.
+			if fatalErr == nil {
+				fatalErr = err
+			}
+			mu.Unlock()
+			return
+		}
+		results[key] = resolved
+		mu.Unlock()
+
+		for _, c := range resolved {
+			if !c.isFolder {
+				continue
+			}
+			childPath := c.localName
+			if key.relativePath != "" {
+				childPath = key.relativePath + "/" + c.localName
+			}
+			wg.Add(1)
+			go fetch(nodeKey{folderID: c.id, relativePath: childPath})
+		}
 	}
 
-	select {
-	case <-time.After(time.Second):
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	root := nodeKey{folderID: folderID, relativePath: relativePath}
+	wg.Add(1)
+	go fetch(root)
+	wg.Wait()
 
-	second, err := s.fetchFolderChildren(ctx, folderID, relativePath)
-	if err != nil {
-		return nil, err
+	if fatalErr != nil {
+		return nil, fatalErr
 	}
-	if len(second) == 0 {
-		// Confirmed empty — a folder with genuinely 0 children is normal, not a bug.
-		return nil, nil
-	}
-
-	s.listingRetryHits.Add(1)
-	logPath := relativePath
-	if logPath == "" {
-		logPath = "(root)"
-	}
-	s.logWarn("Listing trả 0 nhưng verify lại có item — Drive API cụt (path=%s, folder_id=%s, second_count=%d)", logPath, folderID, len(second))
-
-	return second, nil
+	return s.assembleItems(root, results), nil
 }
 
 // rawChild is one direct child of a folder exactly as Drive reported it,
@@ -76,61 +135,98 @@ type resolvedChild struct {
 	collided  bool   // true when a same-name sibling forced this entry to take a suffix
 }
 
-// fetchFolderChildren lists one level (paginated) of folderID, resolves every
-// direct child's final local name as ONE shared namespace (files+folders
-// together — fixes C2/C3), then recurses into any subfolders using the
-// already-resolved path. Separated from ListFolderRecursive so the
-// verify-on-zero retry above can call it again without re-recursing into
-// itself.
+// fetchOneLevel lists ONE folder's direct children (paginated, with the
+// verify-on-zero retry) and resolves them into ONE shared collision-safe
+// namespace (files+folders together — fixes C2/C3). It does NOT recurse —
+// that is now the concurrent orchestrator's job in ListFolderRecursive, so
+// this function stays a single independent unit of work dispatchable to any
+// worker slot.
 //
-// Restructured (2026-07-18 name-collision audit) from the previous
-// list-while-recursing design: resolving names while still paging meant a
-// later page's clashing name could never be seen, so any dedup decision was
-// necessarily unstable. Gathering the full sibling set FIRST is what makes
-// deterministic dedup (see resolveSiblingNames) possible at all.
-func (s *Syncer) fetchFolderChildren(ctx context.Context, folderID string, relativePath string) ([]Item, error) {
+// The only error this can return is ctx cancellation from the verify-on-zero
+// wait below — a genuine Drive API listing error is handled (logged,
+// degraded to partial/empty results) entirely inside collectRawChildren and
+// never reaches here as an `error` (BUG B in the PHP source: an uncaught
+// listing error used to nuke the whole run, including subtrees that had
+// already synced fine — this contract must not regress).
+func (s *Syncer) fetchOneLevel(ctx context.Context, folderID string, relativePath string) ([]resolvedChild, error) {
 	label := relativePath
 	if label == "" {
 		label = "(root)"
 	}
 
 	raw := s.collectRawChildren(ctx, folderID, label)
-	resolved := resolveSiblingNames(raw)
-
-	items := make([]Item, 0, len(resolved))
-	for _, c := range resolved {
-		if c.collided {
-			s.mu.Lock()
-			s.stats.Collisions++
-			s.mu.Unlock()
-			s.logWarn("Trùng tên trong '%s': '%s' (id=%s) phải đổi thành '%s' để không ghi đè/gộp với anh em cùng cấp", label, c.name, c.id, c.localName)
+	if len(raw) == 0 {
+		select {
+		case <-time.After(time.Second):
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 
-		childPath := c.localName
-		if relativePath != "" {
-			childPath = relativePath + "/" + c.localName
+		second := s.collectRawChildren(ctx, folderID, label)
+		if len(second) == 0 {
+			// Confirmed empty — a folder with genuinely 0 children is normal, not a bug.
+			return nil, nil
 		}
-
-		items = append(items, Item{
-			Type:         itemType(c.isFolder),
-			Path:         childPath,
-			ID:           c.id,
-			MimeType:     c.mimeType,
-			MD5Checksum:  c.md5Checksum,
-			ModifiedTime: c.modifiedTime,
-			Size:         c.size,
-		})
-
-		if c.isFolder {
-			children, err := s.ListFolderRecursive(ctx, c.id, childPath)
-			if err != nil {
-				return items, err
-			}
-			items = append(items, children...)
-		}
+		s.listingRetryHits.Add(1)
+		s.logWarn("Listing trả 0 nhưng verify lại có item — Drive API cụt (path=%s, folder_id=%s, second_count=%d)", label, folderID, len(second))
+		raw = second
 	}
 
-	return items, nil
+	return resolveSiblingNames(raw), nil
+}
+
+// assembleItems walks the already-fetched results map depth-first — the
+// EXACT same order the pre-concurrency implementation produced — building
+// the final []Item slice and firing collision stats/logs exactly once per
+// folder. Every key this walks is guaranteed present in results: fetch()
+// above only ever dispatches a child key AFTER writing its parent's own
+// entry, and ListFolderRecursive only calls this once wg.Wait() has
+// returned with no fatal error, i.e. every dispatched fetch has completed
+// and written its entry. Kept as a separate, non-networking pass
+// specifically so it's unit-testable with a hand-built results map (see
+// list_test.go) without a live/mocked Drive API.
+func (s *Syncer) assembleItems(root nodeKey, results map[nodeKey][]resolvedChild) []Item {
+	var walk func(key nodeKey) []Item
+	walk = func(key nodeKey) []Item {
+		resolved := results[key]
+		label := key.relativePath
+		if label == "" {
+			label = "(root)"
+		}
+
+		items := make([]Item, 0, len(resolved))
+		for _, c := range resolved {
+			if c.collided {
+				s.mu.Lock()
+				s.stats.Collisions++
+				s.mu.Unlock()
+				s.logWarn("Trùng tên trong '%s': '%s' (id=%s) phải đổi thành '%s' để không ghi đè/gộp với anh em cùng cấp", label, c.name, c.id, c.localName)
+			}
+
+			childPath := c.localName
+			if key.relativePath != "" {
+				childPath = key.relativePath + "/" + c.localName
+			}
+
+			items = append(items, Item{
+				Type:         itemType(c.isFolder),
+				Path:         childPath,
+				ID:           c.id,
+				ParentID:     key.folderID,
+				MimeType:     c.mimeType,
+				MD5Checksum:  c.md5Checksum,
+				ModifiedTime: c.modifiedTime,
+				Size:         c.size,
+			})
+
+			if c.isFolder {
+				items = append(items, walk(nodeKey{folderID: c.id, relativePath: childPath})...)
+			}
+		}
+		return items
+	}
+
+	return walk(root)
 }
 
 // collectRawChildren pages through folderID's direct children via the Drive

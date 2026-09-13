@@ -223,3 +223,91 @@ func TestResolveSiblingNames_FileKeepsRealExtension(t *testing.T) {
 		}
 	}
 }
+
+// TestAssembleItems_PreservesDepthFirstOrder is the ordering-preservation
+// guarantee the whole concurrency refactor depends on: --limit's documented
+// contract ("first N items in depth-first order", see RUN-SAMPLES §0.5)
+// must not depend on goroutine scheduling. This builds a results map by
+// hand (as if every folder had already been fetched concurrently, in
+// arbitrary completion order) and checks assembleItems reconstructs the
+// exact same depth-first sequence a fully sequential listing would have
+// produced for this tree shape:
+//
+//	root
+//	├── a.txt
+//	├── sub1/ (dir)
+//	│   └── b.txt
+//	└── sub2/ (dir)
+//	    └── c.txt
+func TestAssembleItems_PreservesDepthFirstOrder(t *testing.T) {
+	s := newTestSyncer(t)
+	root := nodeKey{folderID: "root", relativePath: ""}
+
+	results := map[nodeKey][]resolvedChild{
+		root: {
+			{rawChild: rawChild{id: "fileA", name: "a.txt"}, localName: "a.txt"},
+			{rawChild: rawChild{id: "sub1", name: "sub1", isFolder: true}, localName: "sub1"},
+			{rawChild: rawChild{id: "sub2", name: "sub2", isFolder: true}, localName: "sub2"},
+		},
+		{folderID: "sub1", relativePath: "sub1"}: {
+			{rawChild: rawChild{id: "fileB", name: "b.txt"}, localName: "b.txt"},
+		},
+		{folderID: "sub2", relativePath: "sub2"}: {
+			{rawChild: rawChild{id: "fileC", name: "c.txt"}, localName: "c.txt"},
+		},
+	}
+
+	items := s.assembleItems(root, results)
+
+	wantPaths := []string{"a.txt", "sub1", "sub1/b.txt", "sub2", "sub2/c.txt"}
+	if len(items) != len(wantPaths) {
+		t.Fatalf("got %d items, want %d: %+v", len(items), len(wantPaths), items)
+	}
+	for i, want := range wantPaths {
+		if items[i].Path != want {
+			t.Fatalf("item %d: path = %q, want %q (full: %+v)", i, items[i].Path, want, items)
+		}
+	}
+}
+
+// TestAssembleItems_CollisionLogsStatIncrementedOncePerCollidedEntry checks
+// the collision-stat side effect (moved here from the old fetchFolderChildren)
+// survived the refactor intact.
+func TestAssembleItems_CollisionLogsStatIncrementedOncePerCollidedEntry(t *testing.T) {
+	s := newTestSyncer(t)
+	root := nodeKey{folderID: "root", relativePath: ""}
+	results := map[nodeKey][]resolvedChild{
+		root: {
+			{rawChild: rawChild{id: "id1", name: "report.pdf"}, localName: "report.pdf"},
+			{rawChild: rawChild{id: "id2", name: "report.pdf"}, localName: "report_id2.pdf", collided: true},
+		},
+	}
+
+	items := s.assembleItems(root, results)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+	if s.stats.Collisions != 1 {
+		t.Fatalf("expected Collisions=1, got %d", s.stats.Collisions)
+	}
+}
+
+// TestAssembleItems_UnknownKeyDoesNotPanic: a key with no results entry
+// (should be unreachable given ListFolderRecursive's dispatch contract, but
+// assembleItems must degrade rather than panic if it ever happens) yields
+// no items for that subtree instead of crashing the run.
+func TestAssembleItems_UnknownKeyDoesNotPanic(t *testing.T) {
+	s := newTestSyncer(t)
+	root := nodeKey{folderID: "root", relativePath: ""}
+	results := map[nodeKey][]resolvedChild{
+		root: {
+			{rawChild: rawChild{id: "sub1", name: "sub1", isFolder: true}, localName: "sub1"},
+		},
+		// deliberately no entry for {folderID: "sub1", relativePath: "sub1"}
+	}
+
+	items := s.assembleItems(root, results)
+	if len(items) != 1 || items[0].Path != "sub1" {
+		t.Fatalf("expected exactly the dir entry with no children, got %+v", items)
+	}
+}
