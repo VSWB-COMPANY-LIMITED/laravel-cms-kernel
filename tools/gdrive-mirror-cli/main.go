@@ -38,6 +38,7 @@ func run() int {
 	ignoreShrinkFlag := fs.Bool("ignore-shrink", false, "Skip the listing shrink-guard abort — use only when you deliberately deleted a lot of files/folders on Drive")
 	allowCloudSyncPathFlag := fs.Bool("allow-cloud-sync-path", false, "Allow --path to be inside a folder a live cloud-sync client (OneDrive/Google Drive/Dropbox/iCloud) is watching — OFF by default because this causes runaway numbered-duplicate files on the other client's side (see README)")
 	incrementalFlag := fs.Bool("incremental", false, "Use the Drive Changes API for delta sync once a folder has one full listing on record — later runs only re-list folders Drive reports as changed, instead of the whole tree. Self-bootstrapping: first run per folder is always a full listing")
+	pushToFlag := fs.String("push-to", "", "After the run, push --path's current contents into this SECOND directory (typically a live OneDrive/Google Drive/Dropbox folder) as one bounded, non-destructive, only-what-changed copy — the safe way to end up with a mirror inside a cloud-sync folder without --path itself living there. Windows: uses robocopy; other OSes: a built-in Go copier. See README")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s <folderID> [<folderID> ...] --path=<dir> [flags]\n", os.Args[0])
@@ -100,15 +101,40 @@ func run() int {
 		IgnoreShrink:       *ignoreShrinkFlag,
 		AllowCloudSyncPath: *allowCloudSyncPathFlag,
 		Incremental:        *incrementalFlag,
+		PushTo:             *pushToFlag,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if *retryFailedFlag != "" {
-		return runRetryFailed(ctx, baseCfg, *retryFailedFlag, *includePermanentFlag)
+		return maybePush(ctx, baseCfg, runRetryFailed(ctx, baseCfg, *retryFailedFlag, *includePermanentFlag))
 	}
-	return runFolders(ctx, baseCfg, folderIDs)
+	return maybePush(ctx, baseCfg, runFolders(ctx, baseCfg, folderIDs))
+}
+
+// maybePush runs --push-to (when set) after the main sync/retry has
+// finished, regardless of its exit code — even a partially-successful run
+// left --path more up to date than before, and that's still worth pushing.
+// A no-op (returns code unchanged) when --push-to wasn't given, or in
+// --dry-run (nothing was ever written to --path to push). Push failing
+// downgrades a clean exit to 1 — it must not be silently swallowed just
+// because the sync itself succeeded — but never UPGRADES an already-failed
+// code into something that looks like it succeeded.
+func maybePush(ctx context.Context, cfg mirror.Config, code int) int {
+	if cfg.PushTo == "" || cfg.DryRun {
+		return code
+	}
+
+	fmt.Fprintf(os.Stderr, "\n--- Push --path (%s) -> --push-to (%s) ---\n", cfg.Path, cfg.PushTo)
+	_, err := mirror.PushToDestination(ctx, cfg.Path, cfg.PushTo, func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "push --push-to lỗi: %v\n", err)
+		return 1
+	}
+	return code
 }
 
 // folderRunResult pairs one folder's identifier with the Stats its Run()

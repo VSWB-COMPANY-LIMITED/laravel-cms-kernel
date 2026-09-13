@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+- **[gdrive-mirror-cli] `--push-to` — backup vào OneDrive/Google Drive/Dropbox nhanh mà vẫn an
+  toàn, thay cho `--path` trỏ thẳng.** User yêu cầu backup thẳng vào OneDrive "nhanh nhất có
+  thể" sau khi bản trước từ chối `--path` trỏ vào đó (xem mục Fixed cùng ngày bên dưới) — thay vì
+  chỉ chặn, thêm đường đi CHÍNH THỨC: `--path` vẫn là local thuần (qua preflight, giữ nguyên
+  state/`--incremental`), `--push-to=<thư mục OneDrive>` đẩy phần vừa tải sang đó ngay SAU khi
+  mirror xong, trong CÙNG một lệnh. Bước tải (hay ghi đè dồn dập) không còn đụng thư mục sống;
+  bước đẩy là MỘT thao tác gọn, chỉ ghi file thật sự mới/đổi (so size+mtime trước — giống hệt
+  delta-check của chính tool) → lần chạy lặp lại gần như tức thời nếu không có gì đổi. Windows:
+  `robocopy /E /MT:8` (đa luồng, có sẵn hệ điều hành); nơi khác: bộ copy Go tích hợp
+  (`internal/mirror/push.go`), cùng atomic-write-then-rename như `downloadItem`. **Không `/MIR`,
+  không xoá gì ở đích** — khớp triết lý "không bao giờ xoá file local" của cả tool. Vẫn còn rủi ro
+  dư không thể loại bỏ 100% (giới hạn của chính OneDrive khi còn client sống canh thư mục), nhưng
+  loại bỏ đúng nguyên nhân đã đo: ghi lặp dồn dập rải suốt phiên `--concurrency` cao, thay bằng
+  một đợt ghi gọn. README §"Cách được khuyến nghị — --push-to", RUN-SAMPLES §3.12. Test:
+  `internal/mirror/push_test.go` (11 test: skip-khi-giống-hệt, recopy-khi-đổi, không xoá file lạ ở
+  đích, dung sai mtime 2s cho FAT32, diễn giải exit code robocopy).
+
 ### Fixed
 - **[gdrive-mirror-cli] `--path` trỏ vào thư mục OneDrive/Google Drive/Dropbox đang sync sống →
   tự đẻ file trùng tên tăng dần mỗi lần chạy (sự cố thật, đã đo trên production).** `--path` được

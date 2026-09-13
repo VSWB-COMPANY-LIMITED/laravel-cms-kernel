@@ -97,6 +97,15 @@ type Config struct {
 	// normal full listing, which also saves the manifest + a Changes API
 	// page token for the next run to use.
 	Incremental bool
+
+	// PushTo, when set, is a SECOND destination this tool pushes Path's
+	// current contents into after every folder finishes — see push.go.
+	// Typically a live cloud-sync-watched folder (OneDrive/Google Drive/
+	// Dropbox): Path stays a plain local staging directory (so it passes
+	// the cloudsync guard and the download machinery's atomic renames
+	// never touch the watched folder directly), and PushTo receives a
+	// bounded, one-shot, non-destructive, only-what-changed copy instead.
+	PushTo string
 }
 
 // Stats accumulates the end-of-run summary — mutated under Syncer.mu.

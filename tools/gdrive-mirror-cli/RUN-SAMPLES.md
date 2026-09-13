@@ -559,7 +559,7 @@ $folderIds = @(
   --concurrency=8 --list-concurrency=8
 ```
 
-### 3.12 🔴 KHÔNG trỏ `--path` vào thư mục OneDrive đang sync sống
+### 3.12 🔴 KHÔNG trỏ `--path` vào thư mục OneDrive đang sync sống — dùng `--push-to`
 
 **Sự cố thật:** `--path="C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED"` — tool mirror
 Google Drive **thẳng vào gốc OneDrive đang đồng bộ**. Cùng file, cùng size, cùng ngày sửa, cứ mỗi
@@ -568,7 +568,23 @@ lần chạy lại thêm MỘT bản trùng tên tăng dần trên SharePoint (`
 OneDrive coi đó là sửa xung đột và tự đẻ bản mới thay vì hoà giải. Từ bản này, tool **từ chối
 chạy** với `--path` kiểu này (xem README "KHÔNG mirror thẳng vào thư mục cloud-sync sống").
 
-**Sửa đúng — 2 bước tách biệt:**
+**Vẫn cần backup vào OneDrive nhanh nhất có thể? Dùng `--push-to` — MỘT lệnh, tự động, an toàn
+hơn hẳn mirror thẳng:**
+
+```powershell
+.\gdrive-mirror.exe @folderIds `
+  --path="D:\GDrive-Mirror" `
+  --push-to="C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED" `
+  --creds="C:\Tools\gdrive\creds.json" --concurrency=8 --list-concurrency=8
+```
+
+`--path` vẫn là ổ local thuần (qua được preflight, giữ nguyên state/`--incremental`); tool tự đẩy
+phần vừa tải sang `--push-to` **ngay sau khi mirror xong, trong cùng một lệnh** — trên Windows
+dùng `robocopy /E /MT:8` (đa luồng, chỉ ghi file thật sự mới/đổi, KHÔNG `/MIR` nên không xoá gì ở
+OneDrive). Lần chạy lặp lại mà không có gì đổi → bước đẩy gần như tức thời. Xem README §"Cách được
+khuyến nghị — `--push-to`" để hiểu vì sao cách này an toàn hơn `--path` trỏ thẳng.
+
+<details><summary>Cách thủ công 2 bước tách biệt (không dùng --push-to) — vẫn hoạt động, để tham khảo/troubleshoot</summary>
 
 ```powershell
 # 1) Mirror Drive -> ổ LOCAL THUẦN (không phải OneDrive)
@@ -576,13 +592,14 @@ chạy** với `--path` kiểu này (xem README "KHÔNG mirror thẳng vào thư
   --path="D:\GDrive-Mirror" --creds="C:\Tools\gdrive\creds.json" `
   --concurrency=8 --list-concurrency=8
 
-# 2) Đẩy một-chiều sang OneDrive bằng robocopy /MIR, SAU KHI bước 1 chạy xong hẳn
-robocopy "D:\GDrive-Mirror" "C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED" /MIR /R:3 /W:5
+# 2) Đẩy một-chiều sang OneDrive, SAU KHI bước 1 chạy xong hẳn (không song song, không /MIR)
+robocopy "D:\GDrive-Mirror" "C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED" /E /MT:8 /R:2 /W:2
 Write-Host "robocopy exit code: $LASTEXITCODE"   # 0-7 = thành công (xem `robocopy /?`), >=8 = lỗi
 ```
 
-Có thể gộp cả 2 bước vào một script `.bat`/`.ps1` chạy theo lịch (Task Scheduler §3.9) — miễn
-là bước 2 luôn chạy SAU khi bước 1 kết thúc (không chạy song song, không xen kẽ).
+`--push-to` ở trên chính là 2 bước này, tự động hoá trong một lệnh.
+
+</details>
 
 ---
 
@@ -626,7 +643,7 @@ hạ xuống nếu thấy Drive trả lỗi rate-limit (`429`/`userRateLimitExce
 | --- | --- |
 | `error: no credentials file found` | Sai đường dẫn `--creds`, hoặc biến env chưa set. Kiểm tra file tồn tại và không phải thư mục. |
 | Auth OK nhưng liệt kê rỗng | Chưa share thư mục Drive cho `client_email` của service account (quyền Viewer). |
-| `preflight: --path (...) nằm trong thư mục do OneDrive/Google Drive/... đồng bộ SỐNG` | Đúng như thông báo — xem README "KHÔNG mirror thẳng vào thư mục cloud-sync sống" §3.12 ở trên. Đổi `--path` ra ổ local thuần rồi dùng `robocopy /MIR` (Windows) một bước riêng sau. |
+| `preflight: --path (...) nằm trong thư mục do OneDrive/Google Drive/... đồng bộ SỐNG` | Đúng như thông báo — xem §3.12 ở trên. Đổi `--path` ra ổ local thuần, thêm `--push-to=<thư mục OneDrive>` để vẫn tự động backup vào đó trong cùng một lệnh. |
 | Dừng ngay ở preflight | Đích không ghi được thật (ổ chưa mount / read-only / hỏng I/O). Tool ghi-thử file thật để bắt sớm — cắm lại ổ rồi chạy lại. |
 | Chạy dừng giữa chừng sau nhiều lỗi | Circuit breaker cắt sau **20 lỗi I/O local liên tiếp** — ổ đĩa có vấn đề, không phải lỗi mạng. |
 | Nhiều item `permanent` | Loại file Google không export được (Forms/Sites/Maps/Jamboard) hoặc vượt hạn mức export — xem cột `error_reason` trong CSV. |

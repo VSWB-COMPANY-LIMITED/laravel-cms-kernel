@@ -63,6 +63,7 @@ gdrive-mirror --retry-failed=<report.json|dir> --path=<local_dir> [flags]
 | `--include-permanent`  | `false`                                                          | With `--retry-failed`, also retry items marked `permanent` (default: skipped — they cannot self-heal) |
 | `--ignore-shrink`      | `false`                                                          | Skip the listing shrink-guard abort — only when you deliberately deleted a lot on Drive (PHP source's equivalent flag is `--allow-shrink`) |
 | `--allow-cloud-sync-path` | `false`                                                        | Allow `--path` to be inside a folder a live cloud-sync client (OneDrive/Google Drive/Dropbox/iCloud) is watching. OFF by default — see "Không mirror thẳng vào thư mục cloud-sync sống" below for why this is refused by default and what to do instead |
+| `--push-to`            | *(unset)*                                                        | After the run, push `--path`'s current contents into this SECOND directory (typically a live OneDrive/Google Drive/Dropbox folder) as one bounded, non-destructive, only-what-changed copy — the recommended way to end up with a mirror inside a cloud-sync folder. See "Không mirror thẳng vào thư mục cloud-sync sống" below |
 
 One or more `<folderID>` arguments may be given — each folder is synced
 independently, sequentially, with its own local subfolder and its own
@@ -117,33 +118,49 @@ vào một thư mục như vậy — nhận diện qua biến môi trường cli
 (`~/Library/CloudStorage/...` trên macOS, `Dropbox`, `iCloud Drive`…). Xem
 `internal/cloudsync/cloudsync.go`.
 
-**Cách làm ĐÚNG — mirror ra thư mục THUẦN LOCAL trước, đẩy lên cloud bằng một bước RIÊNG sau:**
+### ✅ Cách được khuyến nghị — `--push-to` (một lệnh, backup vào OneDrive vẫn NHANH)
+
+`--path` vẫn là một thư mục LOCAL THUẦN (giữ nguyên toàn bộ máy state/incremental của tool và
+qua được preflight ở trên), nhưng thêm `--push-to=<thư mục OneDrive>` — tool tự động đẩy phần
+vừa tải sang đó ngay sau khi mirror xong, **trong cùng một lệnh, cùng một lần chạy**:
+
+```powershell
+.\gdrive-mirror.exe @folderIds `
+  --path="D:\GDrive-Mirror" `
+  --push-to="C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED" `
+  --creds="C:\Tools\gdrive\creds.json" --concurrency=8
+```
+
+**Vì sao cách này AN TOÀN HƠN mirror thẳng, mà vẫn nhanh:**
+- Bước tải (Drive → `--path`) hoàn toàn KHÔNG đụng tới thư mục OneDrive — mọi rename/ghi-đè dồn
+  dập của giai đoạn tải xảy ra ở ổ local thuần, chỗ không ai canh.
+- Bước đẩy (`--path` → `--push-to`) là MỘT thao tác gọn, chạy SAU khi tải xong hẳn — trên Windows
+  dùng `robocopy` (có sẵn hệ điều hành, đa luồng `/MT:8`), nơi khác dùng bộ copy Go tích hợp sẵn —
+  **cả hai đều chỉ ghi file THẬT SỰ mới/đổi** (so size+mtime trước, giống hệt delta-check của
+  chính tool). Lần chạy lặp lại mà không có gì đổi → bước đẩy gần như tức thời.
+- **Không xoá gì ở `--push-to`** (không `/MIR`, không `/PURGE`) — chỉ thêm/cập nhật, khớp triết lý
+  "không bao giờ xoá file local" của cả tool.
+- Vẫn có rủi ro dư (không thể loại bỏ 100% khi OneDrive desktop client còn sống canh thư mục đó —
+  đây là giới hạn của CHÍNH cơ chế OneDrive, không riêng tool nào), nhưng đã loại bỏ đúng nguyên
+  nhân đã đo được trong sự cố thật: ghi lặp lại liên tục dồn dập vào thư mục sống, rải suốt một
+  phiên `--concurrency` cao, thay bằng MỘT đợt ghi gọn chỉ đúng phần thay đổi.
+
+### Cách thủ công (không dùng `--push-to`) — vẫn hoạt động, để tham khảo/troubleshoot
 
 ```powershell
 # 1) Mirror Drive -> thư mục LOCAL THUẦN (không phải OneDrive)
-$folderIds = @("0Bw6yYZTQJcm3RlI4RU1VaDhSTnc", "14YEPqieYBfCtIIpQ2rakfm5E1G7VVuDl", ...)
-foreach ($id in $folderIds) {
-    .\gdrive-mirror.exe $id --path="D:\GDrive-Mirror" --creds="C:\Tools\gdrive\creds.json" --concurrency=8
-}
+.\gdrive-mirror.exe @folderIds --path="D:\GDrive-Mirror" --creds="C:\Tools\gdrive\creds.json" --concurrency=8
 
-# 2) Đẩy một-chiều sang OneDrive bằng robocopy /MIR — chạy SAU khi bước 1 xong hẳn,
-#    không chạy song song với bước 1 (robocopy tự so size+mtime, chỉ copy phần khác,
-#    và là một thao tác trọn vẹn — không phải N tiến trình rải rác ghi liên tục vào
-#    cùng cây như bước 1 ở trên).
-robocopy "D:\GDrive-Mirror" "C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED" /MIR /R:3 /W:5
+# 2) Đẩy một-chiều sang OneDrive — chạy SAU khi bước 1 xong hẳn (không song song)
+robocopy "D:\GDrive-Mirror" "C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED" /E /MT:8 /R:2 /W:2
 ```
 
-**Muốn dùng MỘT lệnh cho nhiều folder ID thay vì lặp `foreach` gọi N tiến trình riêng** (tool đã
-hỗ trợ nhiều `<folderID>` trong MỘT lần gọi — mỗi folder vẫn có report/runID riêng, một folder
-lỗi không chặn các folder còn lại):
+`--push-to` ở trên chính là bước này, tự động hoá — dùng nó thay vì lệnh `robocopy` tay, trừ khi
+đang debug/cần kiểm soát chi tiết.
 
-```powershell
-.\gdrive-mirror.exe 0Bw6yYZTQJcm3RlI4RU1VaDhSTnc 14YEPqieYBfCtIIpQ2rakfm5E1G7VVuDl ... `
-  --path="D:\GDrive-Mirror" --creds="C:\Tools\gdrive\creds.json" --concurrency=8
-```
-
-**Nếu bạn CHẮC CHẮN muốn tiếp tục mirror thẳng vào thư mục cloud-sync bất chấp rủi ro trên** (vd
-đã tắt hẳn tính năng đồng bộ của client đó cho thư mục này), thêm `--allow-cloud-sync-path`.
+**Nếu bạn CHẮC CHẮN muốn `--path` CHÍNH LÀ thư mục cloud-sync (bỏ qua cả `--push-to`) bất chấp rủi
+ro ở trên** (vd đã tắt hẳn tính năng đồng bộ của client đó cho thư mục này), thêm
+`--allow-cloud-sync-path`.
 
 ## Incremental sync (Drive Changes API) — `--incremental`
 
@@ -340,6 +357,7 @@ internal/localpath/           Pure name-sanitize/truncate/safe-join helpers (uni
 internal/cloudsync/           Pure detection of a --path inside a live OneDrive/Google Drive/
                                Dropbox/iCloud-watched folder (unit tested) — see "KHÔNG mirror
                                thẳng vào thư mục cloud-sync sống" above
+                               (push.go in internal/mirror/ is the --push-to companion — see below)
 internal/mirror/               List (concurrent, list.go)/delta/download/retry/circuit-breaker/
                                shrink-guard/worker-pool/incremental (Drive Changes API, incremental.go)
 internal/report/              Failed-item JSON/CSV/XLSX report writers, unexportable manifest,
