@@ -434,9 +434,12 @@ if (!function_exists('apps_google_sheet')) {
      * @param string $logger Log channel name
      * @param array $mappings Custom field mappings for spreadsheet columns
      * @param bool $with_keys If true, match data keys to spreadsheet headers
-     * @param bool $cache_headers Enable caching of spreadsheet headers
+     * @param bool $cache_headers Cho phép LƯU header vào cache để dùng làm lưới đỡ khi đọc tươi lỗi.
+     *                            Từ 28/09/2026 cache KHÔNG còn là đường chính — xem khối giải thích
+     *                            trong thân hàm.
      * @param int $cache_ttl Cache TTL in seconds (default: 300)
-     * @param bool $cache_force_refresh Force refresh of cached headers
+     * @param bool $cache_force_refresh @deprecated 28/09/2026 — không còn tác dụng: đường chính nay
+     *                                  luôn đọc header tươi. Giữ lại để không phá chữ ký hàm.
      * @return string JSON-encoded response with success/error status
      * @throws \Throwable
      */
@@ -663,75 +666,73 @@ if (!function_exists('apps_google_sheet')) {
                 // ]);
                 #endregion
 
-                if ($cache_headers && !$cache_force_refresh) {
+                // 🔴 [28/09/2026] ĐỌC TƯƠI LÀ ĐƯỜNG CHÍNH. Cache hạ xuống thành LƯỚI ĐỠ.
+                //
+                // ## Vì sao đổi — cache đang che sai chỗ
+                //
+                // Từ 28/09, thứ tự cột không chỉ dùng để map dữ liệu nữa: nó quyết định **vị trí thật**
+                // của từng ô khi ghi (xem khối sắp cột trước `append()` ở cuối hàm). Trước đây gói tự
+                // đi đọc header tươi mỗi lượt ghi, nên dù cache của ta cũ thì cột vẫn không lệch.
+                //
+                // Nay ta sắp thay gói. Cache cũ ⇒ **dòng ghi vào lệch cột, và lệch IM LẶNG** — không
+                // exception, không log, khách chỉ thấy dữ liệu nằm sai ô. Đó là đánh đổi tệ: cache chỉ
+                // tiết kiệm MỘT request nhỏ (`!1:1`, vài KB), còn cái mất là tính đúng của dữ liệu.
+                //
+                // ⚠️ Đừng nhầm hai phép đọc: đọc **cả tab** (24 MB, thứ đã gây sự cố) khác hoàn toàn
+                // đọc **đúng hàng 1**. Bản vá 27/09 đặt cache ở đây khi vẫn tưởng phép đọc là đắt.
+                //
+                // ## Vì sao KHÔNG bỏ cache hẳn — có bằng chứng thật về quota
+                //
+                // Ở nơi gọi (`SpreadsheetTraits.php`, ngay trên lời gọi hàm này) còn nguyên dòng:
+                //     // sleep(2); // Quota exceeded ... 'Read requests per minute per user
+                // ⇒ ĐÃ từng chạm trần read/phút/user của Google. Cache tồn tại vì lý do thật.
+                //
+                // Đo 28/09: cao điểm 13 lượt ghi/phút ⇒ 26 read/phút, trần 60 — còn dư. Nhưng đợt
+                // backfill hàng loạt (30 lead/phút) sẽ chạm đúng trần.
+                //
+                // ⇒ Đường chính đọc tươi; chạm trần / mạng lỗi thì **tự hạ xuống dùng header cache gần
+                // nhất và GHI LOG**. Quota chỉ làm hệ thống kém chính xác **có dấu vết**, không làm nó
+                // hỏng — thay vì như trước: kém chính xác mà không ai biết.
+                //
+                // `$cache_force_refresh` nay không còn ý nghĩa (đường chính đã luôn tươi). Giữ tham số
+                // để không phá chữ ký hàm; @deprecated.
+                $headers = [];
+                $headersFromCache = false;
 
-                    // if (Cache::has($cacheKey)) apps_log($logger)->info('[GSheet Cache::Hit]', ['cache_key' => $cacheKey]);
-                    // else apps_log($logger)->info('[GSheet Cache::Miss]', ['cache_key' => $cacheKey]);
-
-                    /**
-                     * if cache HIT => remember will automatically return cached data if available, otherwise will run callback and store data in cache
-                     */
-                    $headers = Cache::remember($cacheKey, $cache_ttl, function () use ($accessToken, $spreadsheet, $logger, $cacheKey, $cache_ttl) {
-                        // apps_log($logger)->info('[GSheet Cache::Rebuilding headers]', [
-                        //     'spreadsheet_id' => $spreadsheet['spreadsheet']['id'],
-                        //     'sheet_id' => $spreadsheet['sheet']['id'] ?? '',
-                        //     'sheet_name' => $spreadsheet['sheet']['name'] ?? '',
-                        //     'cache_key' => $cacheKey,
-                        // ]);
-
-                        // [27/09/2026] Chỉ tải DÒNG 1 thay vì cả tab — xem apps_gsheet_header_row().
-                        // `sheetById()` vẫn giữ để resolve TÊN tab từ id (chỉ đọc metadata, nhẹ);
-                        // `ranges()` trả về tên đó vì `$range` đang rỗng. KHÔNG set `$range` ở đây:
-                        // nó sticky và `append()` dùng chung, đặt vào là lượt ghi sau ghi nhầm chỗ.
-                        $client = Sheets::setAccessToken($accessToken)
-                            ->spreadsheet($spreadsheet['spreadsheet']['id']) // this is the point that changes context state, be careful if using implicit logic append data
-                            ->sheetById($spreadsheet['sheet']['id']);
-
-                        $fetched = apps_gsheet_header_row(
-                            $accessToken,
-                            $spreadsheet['spreadsheet']['id'],
-                            (string) $client->ranges()
-                        );
-
-                        return is_array($fetched) ? $fetched : collect($fetched)->toArray();
-                    });
-
-                    #region debug cache
-                    // apps_cache_debug($cacheKey, $logger);
-                    // apps_log($logger)->info('[GSheet Cache::Returned Headers]', [
-                    //     'source' => Cache::has($cacheKey) ? 'cache-hit' : 'callback',
-                    //     'cache_key' => $cacheKey,
-                    //     'headers' => $headers,
-                    // ]);
-                    #endregion
-                } else {
-                    // apps_log($logger)->info('[GSheet Cache::Bypass or Forced Refresh]', [
-                    //     'cache_force_refresh' => $cache_force_refresh,
-                    //     'enabled' => $cache_headers,
-                    //     'cache_key' => $cacheKey,
-                    //     'ttl' => $cache_ttl,
-                    // ]);
-
-                    // [27/09/2026] Chỉ tải DÒNG 1 thay vì cả tab — xem apps_gsheet_header_row().
+                try {
+                    // `sheetById()` vẫn giữ để resolve TÊN tab từ id (chỉ đọc metadata, nhẹ);
+                    // `ranges()` trả về tên đó vì `$range` đang rỗng. KHÔNG set `$range` ở đây:
+                    // nó sticky và `append()` dùng chung, đặt vào là lượt ghi sau ghi nhầm chỗ.
                     $client = Sheets::setAccessToken($accessToken)
                         ->spreadsheet($spreadsheet['spreadsheet']['id']) // this is the point that changes context state, be careful if using implicit logic append data
                         ->sheetById($spreadsheet['sheet']['id']);
 
-                    $headers = apps_gsheet_header_row(
+                    // [27/09/2026] Chỉ tải DÒNG 1 thay vì cả tab — xem apps_gsheet_header_row().
+                    $fetched = apps_gsheet_header_row(
                         $accessToken,
                         $spreadsheet['spreadsheet']['id'],
                         (string) $client->ranges()
                     );
 
-                    $headers = is_array($headers) ? $headers : collect($headers)->toArray();
+                    $headers = is_array($fetched) ? $fetched : collect($fetched)->toArray();
+                } catch (\Throwable $e) {
+                    // Quota (429), mạng, token — KHÔNG để cả lượt ghi chết vì một phép đọc phụ.
+                    $headers = $cache_headers ? (array) Cache::get($cacheKey, []) : [];
+                    $headersFromCache = ! blank($headers);
 
-                    if ($cache_headers) {
-                        Cache::put($cacheKey, $headers, $cache_ttl);
-                        // apps_log($logger)->info('[GSheet Cache::Store]', [
-                        //     'cache_key' => $cacheKey,
-                        //     'ttl' => $cache_ttl,
-                        // ]);
-                    }
+                    apps_log($logger)->warning('[GSheet] Đọc header tươi THẤT BẠI' . ($headersFromCache ? ' — sắp cột theo header CŨ trong cache, dòng này có thể lệch cột' : ' — KHÔNG có cache để đỡ'), [
+                        'spreadsheet_id' => $spreadsheet['spreadsheet']['id'] ?? '',
+                        'sheet_id' => $spreadsheet['sheet']['id'] ?? '',
+                        'cache_key' => $cacheKey,
+                        'fell_back_to_cache' => $headersFromCache,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+
+                // Chỉ lưu khi ĐỌC ĐƯỢC thật. Ghi mảng rỗng vào cache là tự đặt bẫy cho lượt sau:
+                // lượt đó lấy được "giá trị hợp lệ" là rỗng nên không biết mình đang thiếu header.
+                if ($cache_headers && ! $headersFromCache && ! blank($headers)) {
+                    Cache::put($cacheKey, $headers, $cache_ttl);
                 }
                 #endregion
 
