@@ -362,6 +362,58 @@ if (!function_exists('apps_build_mapped_values')) {
         return $values_mappings;
     }
 }
+if (!function_exists('apps_gsheet_header_row')) {
+    /**
+     * Đọc DÒNG HEADER (dòng 1) của một tab — chỉ tải đúng 1 dòng.
+     *
+     * ## Vì sao có hàm này (sự cố THẬT 26–27/09/2026)
+     *
+     * Trước đây header lấy bằng `->get()->pull(0)`: `get()` tải TOÀN BỘ tab rồi mới lấy dòng đầu.
+     * Với một sheet 41.000 dòng của khách, `values:batchGet?ranges=Sheet1` không trả kịp ⇒ 395
+     * lần timeout trong một ngày, mỗi lần chờ 60s (≈6,6 giờ chờ vô ích/ngày). Trước khi có trần
+     * thời gian, chính nó treo vô hạn và giết worker hàng đợi suốt 24,5 giờ, kéo 608 job ứ lại.
+     *
+     * Đây là lỗi TỰ NẶNG DẦN: tab càng nhiều dữ liệu càng chậm, nên không con số timeout nào là
+     * "đủ" — phải thôi tải cả tab.
+     *
+     * ## Vì sao gọi thẳng service, thay vì ->range('1:1') cho gọn
+     *
+     * `Sheets` bind bằng `scoped()` (cùng MỘT instance suốt một job), `$range` STICKY —
+     * `spreadsheet()`/`sheet()`/`sheetById()` đều KHÔNG reset nó — và `append()` lại dùng chính
+     * `ranges()`. Nên nếu set `range('1:1')` mà vì bất kỳ lý do gì nó không được trả về nguyên
+     * trạng, lượt ghi kế tiếp sẽ ghi vào đúng DÒNG HEADER của sheet khách.
+     *
+     * Hàm này vì vậy KHÔNG chạm `$range`: lấy service rồi gọi API trực tiếp. Đọc là đọc, ghi là
+     * ghi, không dùng chung state.
+     *
+     * @param  array|string  $accessToken  token OAuth2
+     * @param  string  $spreadsheetId  id bảng tính
+     * @param  string  $sheetName  TÊN tab — lấy từ `->sheetById($id)->ranges()` để đúng cả khi
+     *                             khách đổi tên tab, thay vì tin giá trị lưu trong cấu hình
+     * @return array dòng header; mảng rỗng nếu tab rỗng
+     */
+    function apps_gsheet_header_row($accessToken, string $spreadsheetId, string $sheetName): array
+    {
+        // A1 notation: tên tab phải bọc nháy đơn (nhân đôi nháy đơn bên trong) — tab tên
+        // "Data 2026" hay "Khach's" để trần thì Google trả "Unable to parse range".
+        $quoted = "'" . str_replace("'", "''", $sheetName) . "'";
+
+        $response = Sheets::setAccessToken($accessToken)
+            ->getService()
+            ->spreadsheets_values
+            ->batchGet($spreadsheetId, ['ranges' => $quoted . '!1:1']);
+
+        $valueRanges = $response->getValueRanges();
+
+        if (blank($valueRanges)) {
+            return [];
+        }
+
+        $values = $valueRanges[0]->getValues();
+
+        return is_array($values) && isset($values[0]) && is_array($values[0]) ? $values[0] : [];
+    }
+}
 if (!function_exists('apps_google_sheet')) {
     /**
      * Append data to a Google Sheets spreadsheet.
@@ -620,11 +672,19 @@ if (!function_exists('apps_google_sheet')) {
                         //     'cache_key' => $cacheKey,
                         // ]);
 
-                        $fetched = Sheets::setAccessToken($accessToken)
+                        // [27/09/2026] Chỉ tải DÒNG 1 thay vì cả tab — xem apps_gsheet_header_row().
+                        // `sheetById()` vẫn giữ để resolve TÊN tab từ id (chỉ đọc metadata, nhẹ);
+                        // `ranges()` trả về tên đó vì `$range` đang rỗng. KHÔNG set `$range` ở đây:
+                        // nó sticky và `append()` dùng chung, đặt vào là lượt ghi sau ghi nhầm chỗ.
+                        $client = Sheets::setAccessToken($accessToken)
                             ->spreadsheet($spreadsheet['spreadsheet']['id']) // this is the point that changes context state, be careful if using implicit logic append data
-                            ->sheetById($spreadsheet['sheet']['id'])
-                            ->get()
-                            ->pull(0);
+                            ->sheetById($spreadsheet['sheet']['id']);
+
+                        $fetched = apps_gsheet_header_row(
+                            $accessToken,
+                            $spreadsheet['spreadsheet']['id'],
+                            (string) $client->ranges()
+                        );
 
                         return is_array($fetched) ? $fetched : collect($fetched)->toArray();
                     });
@@ -645,11 +705,16 @@ if (!function_exists('apps_google_sheet')) {
                     //     'ttl' => $cache_ttl,
                     // ]);
 
-                    $headers = Sheets::setAccessToken($accessToken)
+                    // [27/09/2026] Chỉ tải DÒNG 1 thay vì cả tab — xem apps_gsheet_header_row().
+                    $client = Sheets::setAccessToken($accessToken)
                         ->spreadsheet($spreadsheet['spreadsheet']['id']) // this is the point that changes context state, be careful if using implicit logic append data
-                        ->sheetById($spreadsheet['sheet']['id'])
-                        ->get()
-                        ->pull(0);
+                        ->sheetById($spreadsheet['sheet']['id']);
+
+                    $headers = apps_gsheet_header_row(
+                        $accessToken,
+                        $spreadsheet['spreadsheet']['id'],
+                        (string) $client->ranges()
+                    );
 
                     $headers = is_array($headers) ? $headers : collect($headers)->toArray();
 
@@ -742,6 +807,22 @@ if (!function_exists('apps_google_sheet')) {
             //     'values' => $values,
             // ]);
 
+            // 🔴🔴 ĐỪNG "SỬA" KHỐI GHI NÀY — đây là QUYẾT ĐỊNH, không phải thiếu sót.
+            //
+            // CHANGELOG của gói có hai mục dễ làm người đọc hiểu ngược:
+            //   (a) "fix mất dòng khi tab bị Filter/ẩn" bằng ->append([...], 'RAW', 'INSERT_ROWS')
+            //   (b) bản "triệt để": chuyển sang values.update vào A{last+1} (TỰ TÍNH DÒNG CUỐI)
+            // CẢ HAI ĐÃ BỊ GỠ và code cố ý quay về `append()` trần.
+            //
+            // Lý do: cách tính dòng cuối gây sự cố NGHIÊM TRỌNG HƠN chính cái bug nó đi chữa.
+            // Chủ sản phẩm chốt (27/09/2026): giữ `append()` trần, CHẤP NHẬN lỗi Filter/ẩn và xử lý
+            // bằng cách dặn khách KHÔNG bật filter / ẩn dòng trên tab đích — tức đẩy về hành vi
+            // người dùng, thay vì đánh đổi bằng một cơ chế ghi phức tạp đã chứng minh là tệ hơn.
+            //
+            // ⚠️ Đổi cách ghi ở đây = làm lại đúng sự cố đã trả giá. Muốn đụng: HỎI CHỦ SẢN PHẨM.
+            // (Đọc header thì được phép tối ưu — đã làm 27/09 qua apps_gsheet_header_row(); nó cố ý
+            //  KHÔNG chạm `$range` để không ảnh hưởng lượt ghi này.)
+            //
             // Should explicitly specify ->spreadsheet 'spreadsheet.id', avoid reuse from previous stage,
             // Be careful with incorrect spreadsheet insertion if context stage "spreadsheet.id" is modified somewhere
             $result = Sheets::setAccessToken($accessToken)
