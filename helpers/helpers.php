@@ -627,6 +627,13 @@ if (!function_exists('apps_google_sheet')) {
 
             #region Spreadsheet process data
             $values = $values_mappings = [];
+
+            // Khai báo ở scope NGOÀI: `$headers` chỉ được gán bên trong nhánh `$with_keys`, nhưng
+            // bước sắp thứ tự trước `append()` (cuối hàm) lại đọc nó ở scope này. Thiếu dòng này thì
+            // đường `$with_keys = false` đọc một biến chưa tồn tại — PHP chỉ cảnh báo, không chết,
+            // nên lỗi sẽ chảy vào log dưới dạng nhiễu chứ không hiện ra chỗ dễ thấy.
+            $headers = [];
+
             // $spreadsheet['spreadsheet']['id'] = "1zfwtB8vh5RKp9va11F3XHRCC30Zpzbu_1I-RLwS6ugU";
             // $spreadsheet['sheet']['name'] = "LIST DATA";
 
@@ -823,6 +830,48 @@ if (!function_exists('apps_google_sheet')) {
             // (Đọc header thì được phép tối ưu — đã làm 27/09 qua apps_gsheet_header_row(); nó cố ý
             //  KHÔNG chạm `$range` để không ảnh hưởng lượt ghi này.)
             //
+            // 🔴 [28/09/2026] SẮP SẴN THEO HEADER TRƯỚC KHI GỌI `append()`.
+            //
+            // ## Vì sao — mỗi lượt ghi đang kéo 24 MB
+            //
+            // `append()` gọi `orderAppendables()`. Khi dữ liệu là mảng CÓ KHOÁ, hàm đó phải đi hỏi
+            // thứ tự cột thật bằng `$this->first()` → `all()` → `values:batchGet` với range RỖNG
+            // ⇒ **tải TOÀN BỘ tab**. Với tab 26.783 dòng của khách: mỗi lead ghi kéo về ~24 MB và
+            // chạm trần 60s (`cURL error 28 ... with 24467166 bytes received`, đo 28/09 01:29).
+            //
+            // Bản vá 27/09 chỉ chữa đường ĐỌC header (có cache 300s). Đường GHI **không cache** nên
+            // vẫn kéo cả tab MỖI LEAD — đó là thứ làm "insert sheet chậm" rồi hỏng hẳn.
+            //
+            // ## ✅ KHÔNG đụng cách ghi — đây là điều kiện chủ sản phẩm đặt ra
+            //
+            // Vẫn `append()` trần, vẫn để Google tự tìm chỗ chèn. **KHÔNG** tính dòng cuối, **KHÔNG**
+            // `values.update` vào `A{last+1}` — đó là cơ chế đã gây sự cố nặng và đã bị gỡ (xem khối
+            // cảnh báo ngay trên). Thứ duy nhất đổi là **ĐỊNH DẠNG THAM SỐ**: truyền mảng đã tuần tự
+            // thay vì mảng có khoá, nên `orderAppendables()` `return` ngay ở dòng đầu và không đọc gì.
+            //
+            // ## Sắp y hệt cách package sắp — không tự nghĩ ra
+            //
+            // Sao đúng công thức trong `SheetsValues::orderAppendables()`:
+            //   · `array_replace(array_flip($headers), $values)` — khoá nào không có dữ liệu thì giữ
+            //     nguyên giá trị = CHỈ SỐ của nó
+            //   · sau `array_values`, ô nào có `giá trị === chỉ số` nghĩa là cột đó trống ⇒ thay `''`
+            // Giữ nguyên cả nhánh `empty($value)` để hành vi trùng khít.
+            //
+            // ⚠️ Đánh đổi đã được chủ sản phẩm chấp nhận (28/09): `$headers` đến từ cache TTL 300s,
+            // nên nếu khách thêm/xoá/đổi thứ tự cột trong vòng 5 phút thì dòng ghi vào có thể LỆCH
+            // CỘT và lệch im lặng. Trước đây package đọc header tươi mỗi lượt nên không bao giờ lệch
+            // — đó chính là cái giá của việc nó chậm. Xử lý bằng quy ước với khách; tối ưu cache sau.
+            //
+            // Nhánh `$with_keys = false` đã `array_values()` từ trước ⇒ `isAssoc` false ⇒ bỏ qua.
+            if (!blank($headers) && !blank($values) && Arr::isAssoc($values)) {
+                $ordered = array_values(array_replace(array_flip($headers), $values));
+
+                $values = [];
+                foreach ($ordered as $columnIndex => $cellValue) {
+                    $values[] = (empty($cellValue) || $columnIndex === $cellValue) ? '' : $cellValue;
+                }
+            }
+
             // Should explicitly specify ->spreadsheet 'spreadsheet.id', avoid reuse from previous stage,
             // Be careful with incorrect spreadsheet insertion if context stage "spreadsheet.id" is modified somewhere
             $result = Sheets::setAccessToken($accessToken)
