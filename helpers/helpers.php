@@ -398,10 +398,43 @@ if (!function_exists('apps_gsheet_header_row')) {
         // "Data 2026" hay "Khach's" để trần thì Google trả "Unable to parse range".
         $quoted = "'" . str_replace("'", "''", $sheetName) . "'";
 
-        $response = Sheets::setAccessToken($accessToken)
-            ->getService()
-            ->spreadsheets_values
-            ->batchGet($spreadsheetId, ['ranges' => $quoted . '!1:1']);
+        $service = Sheets::setAccessToken($accessToken)->getService();
+
+        // 🔴 [28/09/2026] Trần thời gian RIÊNG cho lượt đọc này — mặc định chung là 60 giây.
+        //
+        // Lượt đọc chỉ lấy MỘT hàng (vài KB) nên 60 giây là vô nghĩa với nó, mà lại là 60 giây
+        // worker đứng yên. Sáng 28/09 Google Sheets hỏng ~30 phút: 42 lượt đều chờ đủ `60002 ms`
+        // rồi nhận `0 bytes`, xong mới lùi về cache — đốt ~42 phút worker để lấy thứ đã có sẵn.
+        //
+        // ⚠️ Client này DÙNG CHUNG với lượt GHI (Sheets bind `scoped()`), mà lượt ghi đo được
+        // 24–49 giây. Nên phải TRẢ LẠI nguyên trạng trong `finally` — rò trần 8 giây sang lượt
+        // ghi là cắt nhầm việc đang chạy đúng. Cùng tinh thần với lý do hàm này không chạm
+        // `$range`: mượn gì thì trả nguyên thứ đó.
+        $client = $service->getClient();
+        $previousHttpClient = $client->getHttpClient();
+
+        // `getHttpClient()` khai báo trả `ClientInterface`, KHÔNG hứa là GuzzleHttp\Client — mà
+        // `getConfig()` thì chỉ Guzzle mới có. Không phải Guzzle ⇒ bỏ qua bước hạ trần, giữ
+        // nguyên đường cũ. Thà chạy chậm như trước còn hơn ném lỗi ở đúng chỗ đang đi chữa lỗi.
+        $canScopeTimeout = $previousHttpClient instanceof \GuzzleHttp\Client;
+
+        try {
+            if ($canScopeTimeout) {
+                $client->setHttpClient(new \GuzzleHttp\Client([
+                    'base_uri' => $previousHttpClient->getConfig('base_uri'),
+                    'http_errors' => false,
+                    'connect_timeout' => (int) config('google.http.connect_timeout', 10),
+                    'timeout' => (int) config('google.http.header_read_timeout', 8),
+                ]));
+            }
+
+            $response = $service->spreadsheets_values
+                ->batchGet($spreadsheetId, ['ranges' => $quoted . '!1:1']);
+        } finally {
+            if ($canScopeTimeout) {
+                $client->setHttpClient($previousHttpClient);
+            }
+        }
 
         $valueRanges = $response->getValueRanges();
 
