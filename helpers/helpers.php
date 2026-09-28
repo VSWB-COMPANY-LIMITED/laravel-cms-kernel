@@ -392,7 +392,7 @@ if (!function_exists('apps_gsheet_header_row')) {
      *                             khách đổi tên tab, thay vì tin giá trị lưu trong cấu hình
      * @return array dòng header; mảng rỗng nếu tab rỗng
      */
-    function apps_gsheet_header_row($accessToken, string $spreadsheetId, string $sheetName, $logger = 'daily'): array
+    function apps_gsheet_header_row($accessToken, string $spreadsheetId, string $sheetName): array
     {
         // A1 notation: tên tab phải bọc nháy đơn (nhân đôi nháy đơn bên trong) — tab tên
         // "Data 2026" hay "Khach's" để trần thì Google trả "Unable to parse range".
@@ -427,27 +427,6 @@ if (!function_exists('apps_gsheet_header_row')) {
                     'timeout' => (int) config('google.http.header_read_timeout', 8),
                 ]));
             }
-
-            // 🔎 [28/09/2026] LOG CHẨN ĐOÁN — TẠM THỜI, gỡ khi đã tìm ra nguyên nhân.
-            //
-            // Trần 8 giây deploy lúc 10:49 mà log THẬT vẫn ghi `timed out after 60002 ms` cho đúng
-            // URL này. Bốn giả thuyết đã bị bác bằng đo đạc: client không phải Guzzle (sai — test
-            // xanh) · Sheets dùng client khác container (sai — cùng object) · attachToHttp làm mất
-            // config (sai — nó `new Client($http->getConfig())`) · config cache cũ (sai — runtime
-            // đọc ra 8). Suy luận đã cạn, nên đo thẳng con số tới được nơi gửi.
-            //
-            // Khoá log để TIẾNG ANH: đây là định danh máy đọc, không phải văn xuôi.
-            apps_log($logger)->info('[gsheet-header] applied http timeout', [
-                'client_class' => get_class($previousHttpClient),
-                'can_scope_timeout' => $canScopeTimeout,
-                'timeout_before' => $previousHttpClient instanceof \GuzzleHttp\Client
-                    ? $previousHttpClient->getConfig('timeout')
-                    : null,
-                'timeout_after' => $client->getHttpClient() instanceof \GuzzleHttp\Client
-                    ? $client->getHttpClient()->getConfig('timeout')
-                    : null,
-                'timeout_configured' => config('google.http.header_read_timeout'),
-            ]);
 
             $response = $service->spreadsheets_values
                 ->batchGet($spreadsheetId, ['ranges' => $quoted . '!1:1']);
@@ -765,8 +744,7 @@ if (!function_exists('apps_google_sheet')) {
                     $fetched = apps_gsheet_header_row(
                         $accessToken,
                         $spreadsheet['spreadsheet']['id'],
-                        (string) $client->ranges(),
-                        $logger
+                        (string) $client->ranges()
                     );
 
                     $headers = is_array($fetched) ? $fetched : collect($fetched)->toArray();
