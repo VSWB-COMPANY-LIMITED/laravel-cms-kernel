@@ -750,14 +750,43 @@ if (!function_exists('apps_google_sheet')) {
                     $headers = is_array($fetched) ? $fetched : collect($fetched)->toArray();
                 } catch (\Throwable $e) {
                     // Quota (429), mạng, token — KHÔNG để cả lượt ghi chết vì một phép đọc phụ.
+                    // 🔴 [14/10/2026] TẦNG ĐỠ THỨ HAI: "header tốt gần nhất" (LKG), TTL 7 ngày.
+                    //
+                    // Sự cố THẬT (khách DGM/Toyota, 14/10): 404/445 lượt ghi trong ngày đọc header
+                    // THẤT BẠI (`cURL error 28`, trần 8 giây), trong đó 137 lượt KHÔNG có cache để
+                    // đỡ. Đối chiếu từng số điện thoại: 19/19 khớp tuyệt đối — mọi lead rơi vào
+                    // nhánh "KHÔNG có cache" đều KHÔNG BAO GIỜ vào được sheet.
+                    //
+                    // Vì sao cache cũ không đỡ nổi: TTL 300 giây, và chỉ được nạp khi đọc THÀNH
+                    // CÔNG. Google chậm kéo dài ⇒ cache hết hạn rồi không bao giờ nạp lại ⇒ càng
+                    // lúc càng nhiều lượt rơi vào nhánh rỗng. Lỗi TỰ NẶNG DẦN, khớp mô tả của
+                    // khách "có hôm lệch tới 50%".
+                    //
+                    // Hàng tiêu đề một tab gần như không đổi ⇒ giữ bản tốt gần nhất 7 ngày là an
+                    // toàn và làm nhánh rỗng gần như biến mất. Đánh đổi: khách đổi cột đúng lúc
+                    // Google hỏng thì dòng có thể lệch cột — vẫn hơn MẤT HẲN, và log phân biệt rõ.
                     $headers = $cache_headers ? (array) Cache::get($cacheKey, []) : [];
                     $headersFromCache = ! blank($headers);
+                    $headersFromLastKnownGood = false;
 
-                    apps_log($logger)->warning('[GSheet] Đọc header tươi THẤT BẠI' . ($headersFromCache ? ' — sắp cột theo header CŨ trong cache, dòng này có thể lệch cột' : ' — KHÔNG có cache để đỡ'), [
+                    if (blank($headers) && $cache_headers) {
+                        $headers = (array) Cache::get($cacheKey . ':lkg', []);
+                        $headersFromLastKnownGood = ! blank($headers);
+                        $headersFromCache = $headersFromLastKnownGood;
+                    }
+
+                    $fallbackLabel = $headersFromLastKnownGood
+                        ? ' — dùng HEADER TỐT GẦN NHẤT (LKG), dòng này có thể lệch cột nếu khách vừa đổi cột'
+                        : ($headersFromCache
+                            ? ' — sắp cột theo header CŨ trong cache, dòng này có thể lệch cột'
+                            : ' — KHÔNG có cache để đỡ');
+
+                    apps_log($logger)->warning('[GSheet] Đọc header tươi THẤT BẠI' . $fallbackLabel, [
                         'spreadsheet_id' => $spreadsheet['spreadsheet']['id'] ?? '',
                         'sheet_id' => $spreadsheet['sheet']['id'] ?? '',
                         'cache_key' => $cacheKey,
                         'fell_back_to_cache' => $headersFromCache,
+                        'fell_back_to_lkg' => $headersFromLastKnownGood,
                         'error' => $e->getMessage(),
                     ]);
                 }
@@ -766,6 +795,8 @@ if (!function_exists('apps_google_sheet')) {
                 // lượt đó lấy được "giá trị hợp lệ" là rỗng nên không biết mình đang thiếu header.
                 if ($cache_headers && ! $headersFromCache && ! blank($headers)) {
                     Cache::put($cacheKey, $headers, $cache_ttl);
+                    // [14/10/2026] Bản LKG sống lâu hơn hẳn — đây là thứ đỡ cho đợt Google hỏng kéo dài.
+                    Cache::put($cacheKey . ':lkg', $headers, now()->addDays(7));
                 }
                 #endregion
 
@@ -904,6 +935,33 @@ if (!function_exists('apps_google_sheet')) {
                 foreach ($ordered as $columnIndex => $cellValue) {
                     $values[] = (empty($cellValue) || $columnIndex === $cellValue) ? '' : $cellValue;
                 }
+            }
+
+            // 🔴 [14/10/2026] CHẶN LƯỢT GHI CHẮC CHẮN HỎNG — thà báo lỗi còn hơn mất lead im lặng.
+            //
+            // Tới đây mà `$headers` vẫn rỗng (đọc tươi hỏng, cache hỏng, LKG cũng rỗng) thì khối
+            // sắp cột ngay trên KHÔNG chạy ⇒ `$values` giữ nguyên dạng mảng CÓ KHOÁ ⇒ `append()`
+            // phải gọi `orderAppendables()` để hỏi thứ tự cột ⇒ tải TOÀN BỘ tab (đo thật: ~24 MB
+            // trên tab 29.600 dòng) ⇒ `cURL error 28` ⇒ **dòng không bao giờ được ghi, và không
+            // một dòng log nào nói rằng đã mất lead**.
+            //
+            // Đó chính xác là cách 7/19 lead Vios của khách DGM biến mất ngày 14/10 (tương quan
+            // 19/19, không ngoại lệ). Ném lỗi ở đây KHÔNG làm mất thêm gì — lượt ghi đó vốn đã
+            // chắc chắn thất bại — nhưng đổi "mất im lặng" thành "lỗi nhìn thấy được": pusher ghi
+            // nhận error + lý do, hiện lên báo cáo Ma trận Lead, và có thể thử lại.
+            //
+            // ⚠️ KHÔNG đụng cách ghi (vẫn `append()` trần theo chốt 27/09 của chủ sản phẩm) —
+            // chỉ chặn trước khi gọi, đúng ca đã biết trước là hỏng.
+            if (blank($headers) && !blank($values) && Arr::isAssoc($values)) {
+                apps_log($logger)->error('[GSheet] BỎ QUA lượt ghi: không có header để sắp cột — lượt này chắc chắn timeout', [
+                    'spreadsheet_id' => Arr::get($spreadsheet, 'spreadsheet.id'),
+                    'sheet_id' => Arr::get($spreadsheet, 'sheet.id'),
+                ]);
+
+                throw new Exception(
+                    'Không đọc được tiêu đề cột của Google Sheet (Google phản hồi chậm). '
+                    . 'Dòng này CHƯA được ghi — hệ thống sẽ thử lại ở lượt đồng bộ sau.'
+                );
             }
 
             // Should explicitly specify ->spreadsheet 'spreadsheet.id', avoid reuse from previous stage,
