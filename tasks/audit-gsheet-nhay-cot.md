@@ -1,7 +1,10 @@
 # Audit: Cột bị "nhảy" khi append lead vào Google Sheet
 
-> Trạng thái: **AUDIT — chưa sửa code.** File này chỉ ghi lại tình trạng lỗi, phán đoán và các
-> phương án đề xuất để bàn tiếp trước khi quyết định đụng vào `apps_google_sheet()`.
+> Trạng thái: **AUDIT — chưa sửa code.** File này là **tài liệu hỗ trợ**: ghi lại tình trạng lỗi,
+> dữ kiện đã kiểm chứng và các phán đoán/phương án đã nghĩ tới. Đây **không phải chỉ thị** cho agent
+> nào nhận task này — mọi giả thuyết, mức độ ưu tiên và cách làm ở mục 5–6 là gợi ý tham khảo; agent
+> nhận việc tự đo lại từ đầu (đọc log, version history, tái hiện bug...) trước khi quyết định hướng
+> xử lý, có quyền bác bỏ hoặc đổi hướng nếu dữ kiện mới không khớp với audit này.
 
 ## 1. Tình trạng lỗi (triệu chứng quan sát được)
 
@@ -141,36 +144,45 @@ Hai điều kiện trùng nhau là hiếm — khớp với "hiếm khi bị lỗ
   biết* "cột trùng tên / cột rỗng tên" là nguồn lỗi cần xử lý, ở một thế hệ code cũ hơn — khả năng
   liên quan tới ký ức "vài năm trước" của người dùng.
 
-## 5. Đề xuất hướng xử lý (CHƯA LÀM — để bàn trước)
+## 5. Các hướng xử lý đã nghĩ tới (tham khảo — agent nhận việc tự đánh giá lại)
 
-Xếp theo mức độ an toàn (ít đụng vào khối ghi "cấm sửa" nhất trước):
+Đây là những phương án đã nghĩ ra trong lúc audit, **không phải danh sách việc phải làm theo thứ
+tự**. Agent nhận task tự cân nhắc dữ kiện mới (log, version history...) để chọn hướng, có thể bỏ
+qua hoặc gộp khác đi. Ghi lại kèm mức độ rủi ro/đụng chạm để tham khảo khi cân nhắc:
 
-1. **Thêm log chẩn đoán có chủ đích** (không đổi hành vi ghi): log lại `$headers` dùng để sắp cột
-   (và nguồn: tươi/cache/LKG) cùng với `$values` SAU khi sắp, ngay trước lời gọi `append()`. Mục
-   tiêu: lần sau lỗi tái diễn, có bằng chứng trực tiếp xác nhận đúng giả thuyết 3.2 thay vì suy đoán.
-2. **Validate trước khi ghi**: nếu số phần tử của `$values` sau sắp cột **ít hơn hẳn** số lượng
-   `$headers`, hoặc có key trong `$values` gốc không khớp bất kỳ phần tử nào trong `$headers`
-   (nghĩa là bị `array_replace` dồn ra cuối) → log cảnh báo rõ ràng (tối thiểu), cân nhắc chặn ghi
-   giống cách đã làm với case "`$headers` rỗng hoàn toàn" (dòng ~955–965).
-3. **Phát hiện header trùng tên trước khi `array_flip`**: nếu `count($headers) !==
-   count(array_unique($headers))`, log cảnh báo tên cột trùng — đúng loại lỗi do con người chỉnh
-   sheet gây ra, phát hiện được mà không cần đổi cách ghi.
-4. **(Lớn hơn, cần hỏi chủ sản phẩm trước — đụng đúng khối "ĐỪNG SỬA")**: cân nhắc truyền range cột
-   tường minh cho `append()` (vd `'SheetName'!A1`) thay vì để Google tự dò bảng — nhưng đây chính là
-   hướng đã từng thử và bị revert vì gây sự cố nặng hơn (xem mục 3.1), nên **chỉ nên làm nếu** có cơ
-   chế khác thay thế để không tái lặp bug collision/mất-lead đã từng xảy ra. Không tự ý làm nếu
-   không có quyết định của chủ sản phẩm.
+- **Log chẩn đoán có chủ đích** (không đổi hành vi ghi): khả năng log lại `$headers` dùng để sắp
+  cột (và nguồn: tươi/cache/LKG) cùng `$values` SAU khi sắp, ngay trước lời gọi `append()`. Rủi ro
+  thấp — chỉ thêm log, không đổi luồng ghi. Có thể hữu ích để có bằng chứng trực tiếp cho giả thuyết
+  3.2 nếu lỗi tái diễn, thay vì suy đoán — nhưng agent tự đánh giá có cần không.
+- **Validate trước khi ghi**: một khả năng là nếu số phần tử của `$values` sau sắp cột ít hơn hẳn số
+  lượng `$headers`, hoặc có key trong `$values` gốc không khớp phần tử nào trong `$headers` (bị
+  `array_replace` dồn ra cuối) — có thể đáng cảnh báo hoặc chặn ghi, tương tự case `$headers` rỗng
+  hoàn toàn đã có sẵn (dòng ~955–965). Mức độ nên "chỉ log" hay "chặn ghi" là quyết định cần cân
+  nhắc đánh đổi (giống các quyết định trước đó trong lịch sử file này), không mặc định.
+- **Phát hiện header trùng tên trước `array_flip`**: `count($headers) !== count(array_unique($headers))`
+  có thể là một tín hiệu đáng log — đúng loại lỗi do con người chỉnh sheet gây ra, phát hiện được mà
+  không cần đổi cách ghi.
+- **Đụng tới khối ghi `append()` (đổi sang truyền range cột tường minh thay vì để Google tự dò
+  bảng)**: đây là vùng code có cảnh báo tường minh trong chính file "ĐỪNG SỬA" (mục 3.1) — từng thử
+  hướng tương tự (`values.update A{last+1}`) và bị revert vì gây sự cố nặng hơn. Nếu agent cân nhắc
+  hướng này, nên đọc kỹ lịch sử ở mục 2 và tự xác minh rủi ro collision/mất-lead trước, không suy ra
+  từ audit này là "được phép làm".
 
-## 6. Việc cần làm tiếp (nếu được duyệt)
+## 6. Những việc có thể giúp xác minh thêm (tham khảo, không phải checklist bắt buộc)
 
-- [ ] Lấy Version History của sheet khách quanh thời điểm dòng 3658 để xác nhận ai/sửa gì trên cột.
-- [ ] Lấy log `daily` quanh thời điểm ghi dòng 3658 (tìm theo `[GSheet]` / `apps_google_sheet`).
-- [ ] Xác nhận dòng 3658 là ghi qua webhook hay nhập tay.
-- [ ] Viết test tái hiện: header cache có N cột, sheet thật N+1 cột (chèn giữa) → verify `$values`
-  sau sắp cột lệch đúng như mô tả — để khoá hành vi trước khi sửa.
-- [ ] Quyết định có nên implement mục 5.1–5.3 (log/validate, an toàn) trước, hay cần cả 5.4 (đổi
-  cách gọi `append()`, rủi ro cao hơn).
+Audit này dừng ở phán đoán vì thiếu vài dữ kiện (mục 4). Nếu agent nhận task có khả năng tiếp cận,
+các việc sau có thể giúp xác nhận hoặc bác bỏ giả thuyết ở mục 3 — nhưng agent tự quyết định có cần,
+theo thứ tự nào, và còn thiếu gì khác mà audit này chưa nghĩ tới:
+
+- Version History của sheet khách quanh thời điểm dòng 3658, để biết thực tế ai/sửa gì trên cột.
+- Log `daily` quanh thời điểm ghi dòng 3658 (tìm theo `[GSheet]` / `apps_google_sheet`).
+- Xác nhận dòng 3658 là ghi qua webhook hay nhập tay (ảnh chụp cho thấy cell I3658 đang active khi
+  chụp, chưa rõ là do hệ thống hay người dùng đang gõ).
+- Một test tái hiện (header cache có N cột, sheet thật N+1 cột do chèn cột giữa) có thể khoá lại
+  hành vi hiện tại trước khi sửa bất cứ gì — nhưng cách viết, phạm vi test là quyết định của agent
+  thực hiện, không phải chỉ định sẵn ở đây.
 
 ---
 *File do Claude tạo trong phiên audit theo yêu cầu người dùng — tổng hợp lại toàn bộ phần trao đổi,
-không có thay đổi nào tới code sản xuất trong phiên này.*
+không có thay đổi nào tới code sản xuất trong phiên này. Nội dung mục 5–6 là tài liệu hỗ trợ/tham
+khảo cho agent nhận việc, không phải chỉ thị — agent tự đo lại và tự quyết định cách làm.*
