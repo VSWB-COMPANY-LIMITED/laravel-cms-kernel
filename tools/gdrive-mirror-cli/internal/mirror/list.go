@@ -11,6 +11,7 @@ import (
 	"google.golang.org/api/drive/v3"
 
 	"github.com/vswb/gdrive-mirror/internal/localpath"
+	"github.com/vswb/gdrive-mirror/internal/report"
 )
 
 // nodeKey identifies one folder-listing unit within the tree: a Drive
@@ -133,6 +134,18 @@ type resolvedChild struct {
 	rawChild
 	localName string // sanitized + truncated + deduped; a single path component, no separators
 	collided  bool   // true when a same-name sibling forced this entry to take a suffix
+
+	// duplicateOfID is the Drive file ID of the sibling this collided
+	// with, set ONLY when c.name (the ORIGINAL, pre-sanitize Drive name)
+	// is EXACTLY identical to that sibling's — i.e. Drive itself has two
+	// distinct items sharing the literal same name in this folder. Left
+	// empty when the collision was merely an ARTIFACT of
+	// localpath.SanitizeComponent (e.g. "a:b.pdf" and "a_b.pdf" both
+	// sanitizing to "a_b.pdf") — that pair is NOT a real Drive-side
+	// duplicate, nothing for a human to review on Drive. Consumed by
+	// assembleItems to populate Stats.NameDuplicates — see
+	// internal/report.NameDuplicate.
+	duplicateOfID string
 }
 
 // fetchOneLevel lists ONE folder's direct children (paginated, with the
@@ -195,6 +208,13 @@ func (s *Syncer) assembleItems(root nodeKey, results map[nodeKey][]resolvedChild
 		}
 
 		items := make([]Item, 0, len(resolved))
+		// byID lets a later sibling that collided with an EARLIER one (see
+		// duplicateOfID) look up that earlier sibling's already-built Item
+		// for the NameDuplicates report below — both are always direct
+		// siblings processed in this same loop, so the original is
+		// guaranteed to already be in byID by the time its duplicate is
+		// reached.
+		byID := make(map[string]Item, len(resolved))
 		for _, c := range resolved {
 			if c.collided {
 				s.mu.Lock()
@@ -208,7 +228,7 @@ func (s *Syncer) assembleItems(root nodeKey, results map[nodeKey][]resolvedChild
 				childPath = key.relativePath + "/" + c.localName
 			}
 
-			items = append(items, Item{
+			item := Item{
 				Type:         itemType(c.isFolder),
 				Path:         childPath,
 				ID:           c.id,
@@ -217,7 +237,26 @@ func (s *Syncer) assembleItems(root nodeKey, results map[nodeKey][]resolvedChild
 				MD5Checksum:  c.md5Checksum,
 				ModifiedTime: c.modifiedTime,
 				Size:         c.size,
-			})
+			}
+			items = append(items, item)
+			byID[c.id] = item
+
+			if c.duplicateOfID != "" {
+				if orig, ok := byID[c.duplicateOfID]; ok {
+					s.mu.Lock()
+					s.stats.NameDuplicates = append(s.stats.NameDuplicates, report.NameDuplicate{
+						FolderPath: key.relativePath,
+						Name:       c.name,
+						Kept: report.NameDuplicateEntry{
+							ID: orig.ID, Path: orig.Path, Size: orig.Size, MimeType: orig.MimeType,
+						},
+						Renamed: report.NameDuplicateEntry{
+							ID: item.ID, Path: item.Path, Size: item.Size, MimeType: item.MimeType,
+						},
+					})
+					s.mu.Unlock()
+				}
+			}
 
 			if c.isFolder {
 				items = append(items, walk(nodeKey{folderID: c.id, relativePath: childPath})...)
@@ -320,6 +359,13 @@ func resolveSiblingNames(children []rawChild) []resolvedChild {
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].id < sorted[j].id })
 
 	used := map[string]bool{}
+	// firstByKey remembers, per ORIGINAL (pre-disambiguation) dedup key, the
+	// first rawChild that claimed it — kept separate from `used` (which also
+	// tracks disambiguated suffix-names, to prevent cascading collisions)
+	// specifically so a later collision on the same key can compare its own
+	// pre-sanitize c.name against this one's, to tell a real Drive-side
+	// same-name duplicate apart from a mere sanitize artifact.
+	firstByKey := map[string]rawChild{}
 	resolved := make([]resolvedChild, 0, len(sorted))
 
 	for _, c := range sorted {
@@ -340,14 +386,20 @@ func resolveSiblingNames(children []rawChild) []resolvedChild {
 			name = localpath.TruncateComponent(name, 0)
 		}
 
-		key := strings.ToLower(name)
-		collided := used[key]
+		origKey := strings.ToLower(name)
+		collided := used[origKey]
+		var duplicateOfID string
 		if collided {
+			if first, ok := firstByKey[origKey]; ok && first.name == c.name {
+				duplicateOfID = first.id
+			}
 			name = disambiguate(name, c.id, used, c.isFolder)
+		} else {
+			firstByKey[origKey] = c
 		}
 		used[strings.ToLower(name)] = true
 
-		resolved = append(resolved, resolvedChild{rawChild: c, localName: name, collided: collided})
+		resolved = append(resolved, resolvedChild{rawChild: c, localName: name, collided: collided, duplicateOfID: duplicateOfID})
 	}
 
 	return resolved

@@ -3,6 +3,22 @@
 ## [Unreleased]
 
 ### Added
+- **[gdrive-mirror-cli] Report `name-duplicates/<folderTag>.md` — phát hiện duplicate THẬT trên
+  Drive (2 Drive ID khác nhau, tên gốc y hệt nhau), tách bạch khỏi trùng do sanitize ký tự.**
+  Phát hiện thật 2026-10-26: 1 file `.docx` bị lưu "Save As" trùng tên 2 lần cách nhau vài phút,
+  sinh ra 2 Drive item khác ID, kích thước gần giống nhau — tool mirror đúng cả hai (gắn hậu tố ID
+  cho bản đến sau, không đè/mất gì), nhưng log WARN cũ không phân biệt được đây là duplicate thật
+  hay chỉ là 2 file khác nhau tình cờ sanitize ra cùng tên cục bộ (vd `a:b.pdf` và `a_b.pdf` cùng
+  thành `a_b.pdf` — không phải duplicate). `resolveSiblingNames` (`internal/mirror/list.go`) nay so
+  tên GỐC (trước sanitize) của 2 bên khi có collision: tên gốc y hệt → gắn `duplicateOfID`;
+  `assembleItems` gom các cặp này vào `Stats.NameDuplicates`
+  (`internal/report.NameDuplicate`/`NameDuplicateEntry`). Report mới
+  (`internal/report/duplicates.go`: `BuildNameDuplicatesReport`/`WriteNameDuplicatesReport`) theo
+  đúng lifecycle của `unexportable/*.md` — luôn ghi đè, phản ánh hiện trạng, tự xoá khi hết duplicate
+  — liệt kê link Drive 2 bên để người thật so nội dung và tự xoá bản dư TRÊN DRIVE (tool không tự
+  xoá). Test: `TestResolveSiblingNames_TrueDriveDuplicate_*`,
+  `TestAssembleItems_TrueDuplicateRecordedInStats` (`list_test.go`),
+  `TestBuildNameDuplicatesReport_*`/`TestWriteNameDuplicatesReport_*` (`duplicates_test.go`).
 - **[gdrive-mirror-cli] Rename/move tracking — tự dời file/folder local theo Drive, không sinh
   duplicate khi Google Doc/Sheet/Slide bị đổi tên.** Trước đây khi 1 item đổi tên trên Drive (cùng
   ID, tên mới), lần mirror sau tạo file local tên mới nhưng KHÔNG xoá file cũ (tool không bao giờ

@@ -258,6 +258,61 @@ func TestResolveSiblingNames_FileKeepsRealExtension(t *testing.T) {
 	}
 }
 
+// TestResolveSiblingNames_TrueDriveDuplicate_SetsDuplicateOfID reproduces the
+// real case reported 2026-10-26: two DIFFERENT Drive items (different IDs,
+// different content/size) sharing the EXACT SAME original name in the same
+// folder ("CREATIVE_BRIEF_V4_PULL.VN_gửi_creative_team.md.docx" twice,
+// a human "Save As"-ing the same name minutes apart). Both still mirror
+// safely (collision-suffix handling), but this pair must ALSO be flagged as
+// a real Drive-side duplicate for a human to triage — duplicateOfID must
+// point at the sibling that kept the plain name.
+func TestResolveSiblingNames_TrueDriveDuplicate_SetsDuplicateOfID(t *testing.T) {
+	const name = "CREATIVE_BRIEF_V4_PULL.VN_gửi_creative_team.md.docx"
+	resolved := resolveSiblingNames([]rawChild{
+		{id: "idAAAAAAAAAAAAAAAAAAAA", name: name, size: 212446},
+		{id: "idBBBBBBBBBBBBBBBBBBBB", name: name, size: 212448},
+	})
+
+	if resolved[0].duplicateOfID != "" {
+		t.Errorf("first (kept-name) sibling should not itself point at a duplicateOfID, got %q", resolved[0].duplicateOfID)
+	}
+	if resolved[1].duplicateOfID != resolved[0].id {
+		t.Fatalf("second sibling duplicateOfID = %q, want %q (the kept-name sibling's ID)", resolved[1].duplicateOfID, resolved[0].id)
+	}
+	if !resolved[1].collided {
+		t.Fatalf("second sibling should also be marked collided=true")
+	}
+}
+
+// TestResolveSiblingNames_SanitizeArtifactCollision_DoesNotSetDuplicateOfID is
+// the necessary counterpart: two DIFFERENT original Drive names that merely
+// SANITIZE to the same local name (a ':' becoming '_') must still collide
+// (disambiguated, never silently merged/overwritten) but must NOT be
+// reported as a real Drive-side duplicate — they are two genuinely different
+// files, and flagging them would just be noise a human would learn to
+// ignore.
+func TestResolveSiblingNames_SanitizeArtifactCollision_DoesNotSetDuplicateOfID(t *testing.T) {
+	resolved := resolveSiblingNames([]rawChild{
+		{id: "idAAAAAAAAAAAAAAAAAAAA", name: "Th09-Th10:2021.pdf"},
+		{id: "idBBBBBBBBBBBBBBBBBBBB", name: "Th09-Th10_2021.pdf"},
+	})
+
+	for _, r := range resolved {
+		if r.duplicateOfID != "" {
+			t.Fatalf("sanitize-artifact collision must not be flagged as a real duplicate: id=%s duplicateOfID=%q", r.id, r.duplicateOfID)
+		}
+	}
+	collidedCount := 0
+	for _, r := range resolved {
+		if r.collided {
+			collidedCount++
+		}
+	}
+	if collidedCount != 1 {
+		t.Fatalf("expected exactly 1 collided entry (still needs disambiguation), got %d", collidedCount)
+	}
+}
+
 // TestAssembleItems_PreservesDepthFirstOrder is the ordering-preservation
 // guarantee the whole concurrency refactor depends on: --limit's documented
 // contract ("first N items in depth-first order", see RUN-SAMPLES §0.5)
@@ -323,6 +378,45 @@ func TestAssembleItems_CollisionLogsStatIncrementedOncePerCollidedEntry(t *testi
 	}
 	if s.stats.Collisions != 1 {
 		t.Fatalf("expected Collisions=1, got %d", s.stats.Collisions)
+	}
+}
+
+// TestAssembleItems_TrueDuplicateRecordedInStats checks the other half of
+// the real 2026-10-26 case end to end: when resolveSiblingNames flags a pair
+// via duplicateOfID, assembleItems must turn that into exactly one
+// report.NameDuplicate in Stats.NameDuplicates, correctly pairing each
+// side's own already-built Item (path/size/mimeType) — not just propagate
+// the raw IDs.
+func TestAssembleItems_TrueDuplicateRecordedInStats(t *testing.T) {
+	s := newTestSyncer(t)
+	root := nodeKey{folderID: "root", relativePath: "Brief"}
+	results := map[nodeKey][]resolvedChild{
+		root: {
+			{rawChild: rawChild{id: "idKept", name: "dup.docx", size: 100}, localName: "dup.docx"},
+			{rawChild: rawChild{id: "idRenamed", name: "dup.docx", size: 101}, localName: "dup_idRenamed.docx", collided: true, duplicateOfID: "idKept"},
+		},
+	}
+
+	items := s.assembleItems(root, results)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+	if len(s.stats.NameDuplicates) != 1 {
+		t.Fatalf("expected exactly 1 NameDuplicate recorded, got %d: %+v", len(s.stats.NameDuplicates), s.stats.NameDuplicates)
+	}
+
+	d := s.stats.NameDuplicates[0]
+	if d.Name != "dup.docx" {
+		t.Errorf("Name = %q, want %q", d.Name, "dup.docx")
+	}
+	if d.FolderPath != "Brief" {
+		t.Errorf("FolderPath = %q, want %q", d.FolderPath, "Brief")
+	}
+	if d.Kept.ID != "idKept" || d.Kept.Path != "Brief/dup.docx" || d.Kept.Size != 100 {
+		t.Errorf("Kept = %+v, unexpected", d.Kept)
+	}
+	if d.Renamed.ID != "idRenamed" || d.Renamed.Path != "Brief/dup_idRenamed.docx" || d.Renamed.Size != 101 {
+		t.Errorf("Renamed = %+v, unexpected", d.Renamed)
 	}
 }
 

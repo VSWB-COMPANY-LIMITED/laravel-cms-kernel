@@ -133,4 +133,19 @@ type Stats struct {
 	// follow a detected Drive-side rename/move instead of leaving a stale
 	// duplicate under the old name — see Syncer.applyKnownRename.
 	RenamesApplied int
+
+	// NameDuplicates collects every pair of DIRECT siblings this run found
+	// sharing the exact same ORIGINAL (pre-sanitize) Drive name — two
+	// genuinely different Drive items (different IDs, often different
+	// content) that happen to carry the identical name in the same folder,
+	// most commonly a human "Save As"-ing the same name twice. Both sides
+	// are still mirrored correctly and safely (the collision-suffix
+	// handling in list.go never overwrites/loses anything) — this is only
+	// a triage list for a human to review on Drive itself and decide
+	// whether one side is redundant. Deliberately excludes a collision
+	// that was merely an ARTIFACT of SanitizeComponent (e.g. "a:b.pdf" and
+	// "a_b.pdf" both sanitizing to "a_b.pdf") — those are two genuinely
+	// different files, not a Drive-side duplicate. See
+	// internal/report.NameDuplicate / WriteNameDuplicatesReport.
+	NameDuplicates []report.NameDuplicate
 }

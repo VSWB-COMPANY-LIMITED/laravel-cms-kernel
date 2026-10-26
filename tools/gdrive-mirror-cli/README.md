@@ -380,6 +380,21 @@ When any item fails, reports are written to
   file view). Unlike the reports above, this file is **always overwritten**
   and reflects the folder's *current* state rather than one run's history —
   it's deleted automatically once the folder has no more permanent failures.
+- `name-duplicates/<folderTag>.md` — Markdown triage list of every pair of
+  **direct siblings that share the exact same original (pre-sanitize) Drive
+  name** — two genuinely different Drive items (different IDs, often
+  different content/size) carrying the identical name in the same folder,
+  most commonly a human "Save As"-ing the same name twice. Both sides are
+  still mirrored correctly and safely (the collision-suffix handling never
+  overwrites/merges anything) — this report exists only so a human can open
+  both Drive links, compare content, and decide whether one side is
+  redundant (the tool never deletes anything itself, including here).
+  **Deliberately excludes** a collision that was merely an artifact of name
+  sanitization (e.g. `a:b.pdf` and `a_b.pdf` both sanitizing to `a_b.pdf`) —
+  that pair is two genuinely different files, not a Drive-side duplicate, and
+  would just be noise. Same lifecycle as `unexportable/`: always overwritten,
+  reflects the folder's *current* state, deleted once nothing is left to
+  flag.
 - `state/<folderTag>.json` — the listing shrink-guard's baseline for the
   NEXT run (`folder_id`/`item_count`/`listed_at`/`run_id`). Always written
   after a normal (non-`--dry-run`, non-`--retry-failed`) listing that the

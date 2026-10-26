@@ -678,13 +678,16 @@ func optStr(v string) *string {
 func (s *Syncer) writeReports(reportDir string, folderIDs []string) {
 	s.mu.Lock()
 	failed := append([]report.FailedItem(nil), s.stats.FailedFiles...)
+	nameDups := append([]report.NameDuplicate(nil), s.stats.NameDuplicates...)
 	s.mu.Unlock()
 
-	// Unexportable manifest is evaluated UNCONDITIONALLY, even when failed
-	// is empty this run — a folder that had permanent failures before but
-	// is now clean must have its stale manifest deleted (see
-	// WriteUnexportableManifest doc), so this can't sit behind the
-	// len(failed)==0 early-return below like the other three reports.
+	// Unexportable manifest AND the name-duplicates report are both
+	// evaluated UNCONDITIONALLY, even when failed/nameDups is empty this
+	// run — a folder that had permanent failures (or duplicate names)
+	// before but is now clean must have its stale report deleted (see
+	// WriteUnexportableManifest / WriteNameDuplicatesReport doc), so
+	// neither can sit behind the len(failed)==0 early-return below like
+	// the other three failed-item reports.
 	meta := report.ManifestMeta{
 		GeneratedAt:   time.Now().Format(time.RFC3339),
 		RunID:         s.runID,
@@ -695,6 +698,12 @@ func (s *Syncer) writeReports(reportDir string, folderIDs []string) {
 		s.logWarn("Could not write unexportable manifest: %v", err)
 	} else if manifestPath != "" {
 		s.logf("File KHÔNG THỂ mirror (permanent) — chi tiết + link tải tay: %s", manifestPath)
+	}
+
+	if dupPath, err := report.WriteNameDuplicatesReport(reportDir, nameDups, meta); err != nil {
+		s.logWarn("Could not write name-duplicates report: %v", err)
+	} else if dupPath != "" {
+		s.logf("Trùng tên THẬT trên Drive (cần người soát): %s", dupPath)
 	}
 
 	if len(failed) == 0 {
@@ -772,6 +781,9 @@ func (s *Syncer) printSummary(duration time.Duration) {
 	fmt.Printf("Collisions:          %d\n", s.stats.Collisions)
 	if s.stats.RenamesApplied > 0 {
 		fmt.Printf("Renamed (dời theo Drive, không tải lại): %d\n", s.stats.RenamesApplied)
+	}
+	if len(s.stats.NameDuplicates) > 0 {
+		fmt.Printf("Trùng tên THẬT trên Drive (cần người soát): %d\n", len(s.stats.NameDuplicates))
 	}
 	fmt.Printf("Errors:              %d (permanent: %d, retryable: %d)\n", s.stats.Errors, permanentCount, retryableCount)
 	if s.stats.Aborted {
