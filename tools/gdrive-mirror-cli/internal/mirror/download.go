@@ -113,6 +113,22 @@ func (s *Syncer) evaluateLocal(t fileTask) (DeltaCheck, error) {
 		return dc, nil // size mismatch already decides the outcome — skip hashing
 	}
 	if dc.HasRemoteMD5 {
+		// Fast path: downloadItem sets the local file's mtime to EXACTLY
+		// Drive's reported ModifiedTime on every successful download (see
+		// os.Chtimes there). So size matching AND local mtime matching
+		// Drive's mtime down to the second can only mean this local file IS
+		// the same bytes this tool already verified against this exact
+		// RemoteMD5 on a prior run — re-reading the whole file just to
+		// recompute the same hash is pure waste, and on a large mostly-
+		// unchanged tree this is the dominant per-run I/O/CPU cost. Falls
+		// through to the real hash whenever that equality doesn't hold
+		// (first download, content changed, Chtimes failed/unsupported
+		// filesystem, file touched by something else) — never a weaker
+		// check than before, only a skip when the answer is already known.
+		if dc.RemoteMTime > 0 && dc.LocalMTime == dc.RemoteMTime {
+			dc.LocalMD5 = dc.RemoteMD5
+			return dc, nil
+		}
 		sum, err := md5File(t.targetPath)
 		if err != nil {
 			return dc, err

@@ -198,7 +198,16 @@ biến cho mirror backup định kỳ), chi phí này không đáng kể.
 ## Behavior (ported from the PHP source — see its docblock for the full story)
 
 - **Delta sync**: `--force` always re-downloads; regular files compare
-  size then MD5; Google-native files (no MD5) fall back to mtime.
+  size then MD5; Google-native files (no MD5) fall back to mtime. Fast path:
+  when a local file's size AND mtime both match exactly what the last
+  successful download of this item recorded (mtime is set to Drive's own
+  `modifiedTime` on every successful download — see `downloadItem`), the MD5
+  comparison is answered from that equality alone instead of re-reading and
+  re-hashing the whole file. On a repeat run over a large, mostly-unchanged
+  tree this removes nearly all local disk I/O/CPU for unchanged files; any
+  file whose mtime doesn't match that exact value (first download, content
+  actually changed, filesystem that doesn't support `Chtimes`) still gets a
+  real hash, so this never weakens the correctness check.
 - **Google-native → Office**: Docs→docx, Sheets→xlsx, Slides→pptx,
   Drawings→png, Apps Script→json. Shortcuts are skipped (pointers only —
   their target is a separate listed item). Any other native type

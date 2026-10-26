@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### Added
+- **[gdrive-mirror-cli] Fast-path bỏ qua hash MD5 lại cho file không đổi (delta-check).** Rà soát
+  quá trình kéo dữ liệu Drive → local: với cây lớn ít thay đổi (ca phổ biến nhất — cron chạy lại
+  định kỳ), `evaluateLocal` cũ luôn đọc lại TOÀN BỘ nội dung mỗi file size-khớp để tính MD5 so với
+  Drive, dù file đó không đổi gì — chi phí đọc đĩa + CPU hash lặp lại trên TOÀN BỘ dung lượng cây
+  mỗi lần chạy. `downloadItem` đã luôn gán `mtime` local đúng bằng `modifiedTime` của Drive sau mỗi
+  lần tải thành công (`os.Chtimes`) — nên nếu size khớp VÀ mtime local khớp TUYỆT ĐỐI với mtime
+  Drive đang báo, đó chỉ có thể là đúng bản đã tải thành công lần trước khớp MD5 đó, không cần đọc
+  lại để hash nữa. Mọi trường hợp mtime không khớp tuyệt đối (lần tải đầu, nội dung thật sự đổi,
+  filesystem không hỗ trợ `Chtimes`) vẫn hash đầy đủ như cũ — không giảm độ chính xác, chỉ bỏ việc
+  đọc dư thừa khi câu trả lời đã chắc chắn. `internal/mirror/download.go::evaluateLocal`. Test:
+  `TestEvaluateLocal_FastPath_SkipsHashWhenMTimeExactlyMatchesRemote`,
+  `TestEvaluateLocal_FastPath_FallsBackToHashWhenMTimeDiffers` (`download_test.go`).
 - **[gdrive-mirror-cli] `--push-to` — backup vào OneDrive/Google Drive/Dropbox nhanh mà vẫn an
   toàn, thay cho `--path` trỏ thẳng.** User yêu cầu backup thẳng vào OneDrive "nhanh nhất có
   thể" sau khi bản trước từ chối `--path` trỏ vào đó (xem mục Fixed cùng ngày bên dưới) — thay vì
