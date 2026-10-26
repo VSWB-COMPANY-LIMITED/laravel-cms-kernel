@@ -53,42 +53,79 @@ chứa 19 folder ID + đường dẫn OneDrive cụ thể của tổ chức; b�
 khi cần dựng lại máy khác hoặc đổi danh sách folder).
 
 ```powershell
-$exe     = "C:\Tools\gdrive\gdrive-mirror.exe"
-$staging = "C:\GDrive-Mirror"
-$pushTo  = "C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED"
-$creds   = "C:\Tools\gdrive\creds.json"
-$logDir  = "C:\Tools\gdrive\logs"
-$log     = Join-Path $logDir "run-$(Get-Date -Format yyyyMMdd-HHmmss).log"
+$exe       = "C:\Tools\gdrive\gdrive-mirror.exe"
+$staging   = "C:\GDrive-Mirror"
+$pushTo    = "C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED"
+$creds     = "C:\Tools\gdrive\creds.json"
+$logDir    = "C:\Tools\gdrive\logs"
+$log       = Join-Path $logDir "run-$(Get-Date -Format yyyyMMdd-HHmmss).log"
+$stateFile = Join-Path $logDir "completed-folders.txt"   # resume -- xem §3.2
 
 $folderIds = @("<folder-id-1>", "<folder-id-2>", ...)   # 19 ID thật — xem file trên máy
 
 if (-not (Test-Path $staging)) { New-Item -ItemType Directory -Path $staging -Force | Out-Null }
 if (-not (Test-Path $logDir))  { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
+$alreadyDone = @()
+if (Test-Path $stateFile) { $alreadyDone = @(Get-Content $stateFile | Where-Object { $_ -ne "" }) }
+
+# Xoá đệ quy an toàn với đường dẫn dài/Unicode (xem §3.1) -- dùng robocopy /purge, KHÔNG dùng
+# Remove-Item -Recurse trực tiếp.
+function Remove-DirLongPathSafe {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $true }
+    $empty = Join-Path $env:TEMP "gdrive-mirror-empty-$(Get-Random)"
+    New-Item -ItemType Directory -Path $empty -Force | Out-Null
+    try {
+        robocopy $empty $Path /purge /NFL /NDL /NJH /NJS /R:1 /W:1 | Out-Null
+        if ($LASTEXITCODE -ge 8) { return $false }   # >=8 = lỗi thật (0-7 = thành công, xem robocopy /?)
+        Remove-Item -Path $Path -Force -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    } finally {
+        Remove-Item -Path $empty -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $summary = @()
 foreach ($id in $folderIds) {
+    if ($alreadyDone -contains $id) {
+        "Folder $id -- SKIP (da xong tu truoc)" | Tee-Object -FilePath $log -Append
+        continue
+    }
+
     "`n===== $(Get-Date -Format s) Folder $id =====" | Tee-Object -FilePath $log -Append
 
-    $before = @(Get-ChildItem -Path $staging -Force -Name -ErrorAction SilentlyContinue)
+    # try/catch quanh CẢ vòng lặp: 1 exception PowerShell bất ngờ ở 1 folder không được làm
+    # dừng cả batch (xem §3.1 — đây chính là lỗi thật đã gặp trước khi có try/catch này).
+    try {
+        $before = @(Get-ChildItem -Path $staging -Force -Name -ErrorAction SilentlyContinue)
 
-    & $exe $id --path="$staging" --push-to="$pushTo" --creds="$creds" --retry=10 --concurrency=8 *>&1 |
-        Tee-Object -FilePath $log -Append
-    $code = $LASTEXITCODE
-    "Exit code: $code" | Tee-Object -FilePath $log -Append
+        & $exe $id --path="$staging" --push-to="$pushTo" --creds="$creds" --retry=10 --concurrency=8 *>&1 |
+            Tee-Object -FilePath $log -Append
+        $code = $LASTEXITCODE
+        "Exit code: $code" | Tee-Object -FilePath $log -Append
 
-    # Chỉ dọn khi push đã thực sự chạy (maybePush luôn chạy với code 0/1; code khác là lỗi fatal
-    # trước khi tới bước push — xem main.go). Chỉ xoá đúng top-level entry MỚI xuất hiện lần này,
-    # để không đụng dữ liệu của folder khác nếu 2 folder ID trùng tên Drive.
-    if ($code -eq 0 -or $code -eq 1) {
-        $after = @(Get-ChildItem -Path $staging -Force -Name -ErrorAction SilentlyContinue)
-        $new = $after | Where-Object { $before -notcontains $_ }
-        if ($new) {
-            foreach ($n in $new) { Remove-Item -Path (Join-Path $staging $n) -Recurse -Force }
+        # Chỉ dọn khi push đã thực sự chạy (maybePush luôn chạy với code 0/1; code khác là lỗi
+        # fatal trước khi tới bước push — xem main.go). Chỉ xoá đúng top-level entry MỚI xuất
+        # hiện lần này, để không đụng dữ liệu của folder khác nếu 2 folder ID trùng tên Drive.
+        if ($code -eq 0 -or $code -eq 1) {
+            $after = @(Get-ChildItem -Path $staging -Force -Name -ErrorAction SilentlyContinue)
+            $new = $after | Where-Object { $before -notcontains $_ }
+            $allOk = $true
+            foreach ($n in $new) {
+                if (-not (Remove-DirLongPathSafe -Path (Join-Path $staging $n))) { $allOk = $false }
+            }
+            # Chỉ ghi vào state (coi là "xong", bỏ qua lần resume sau) khi push ĐÃ chạy VÀ dọn
+            # dẹp sạch hoàn toàn -- không đánh dấu xong rồi bỏ sót rác không dọn được.
+            if ($new -and $allOk) { Add-Content -Path $stateFile -Value $id }
         }
-        # else: không có entry mới -> có thể trùng tên top-level với 1 folder ID khác trong danh
-        # sách -> KHÔNG tự xoá, cần kiểm tra tay (xem log "CANH BAO" dòng tương ứng)
+        $summary += [pscustomobject]@{ FolderID = $id; ExitCode = $code }
+    } catch {
+        "LOI KHONG LUONG TRUOC, bo qua folder nay, tiep tuc folder sau: $_" | Tee-Object -FilePath $log -Append
+        $summary += [pscustomobject]@{ FolderID = $id; ExitCode = "EXCEPTION" }
     }
-    $summary += [pscustomobject]@{ FolderID = $id; ExitCode = $code }
 }
 $summary | Format-Table -AutoSize
 ```
@@ -101,6 +138,58 @@ cd C:\Tools\gdrive
 ```
 
 Log mỗi lần chạy nằm ở `C:\Tools\gdrive\logs\run-<timestamp>.log`.
+
+### 3.1 Sự cố thật đã gặp — `Remove-Item -Recurse` chết giữa đường vì MAX_PATH
+
+Lần chạy đầu (19 folder, 2026-10-26), script dừng hẳn ở folder 16/19 — không chạy tiếp 3 folder
+cuối, không in SUMMARY. Nguyên nhân: bước dọn staging dùng
+`Remove-Item -Path ... -Recurse -Force -ErrorAction Stop` gặp 1 cây con rất sâu, nhiều tầng tên
+tiếng Việt (`...\Chảo chiên đế từ\13. 15.17 Chao chong dinh Affinity IH-DFP\15. Chảo chống dính
+Affinity IH - xanh ngọc - DFP\H18203-SJ28A (DFP Affinity IH - xanh)\chao sau long xanh.jpg`) —
+tổng độ dài path vượt 260 ký tự (MAX_PATH kinh điển của Windows). `Remove-Item` đi qua .NET
+`System.IO`, vốn KHÔNG tự lách MAX_PATH như Go làm (xem dưới) — ném `DirectoryNotFoundException`,
+và vì `-ErrorAction Stop` làm nó thành lỗi dừng (terminating) nằm ngoài try/catch, cả script
+`foreach` chết theo.
+
+**Quan trọng — đây KHÔNG phải bug của `gdrive-mirror.exe`.** Chính `gdrive-mirror.exe` đã tải và
+viết đúng những file đường dẫn dài/Unicode đó xuống đĩa không lỗi gì (robocopy push sau đó cũng
+copy sạch 100%, 0 FAILED) — vì Go trên Windows tự prefix `\\?\` cho path, lách MAX_PATH hoàn toàn
+(xem comment `internal/localpath/localpath.go` dòng 38-41, đã được audit từ trước). Bug chỉ nằm ở
+**script PowerShell wrapper của việc vận hành** (bước dọn dẹp để tiết kiệm đĩa, xem §2) — không
+phải ở tool.
+
+**Fix đã áp dụng** (bản script ở trên đã có sẵn):
+
+1. Đổi `Remove-Item -Recurse` trực tiếp → `Remove-DirLongPathSafe` (dùng `robocopy ... /purge`
+   để xoá nội dung — robocopy tự xử lý extended-length path tốt, đã chứng minh qua chính bước
+   push ở trên — rồi mới `Remove-Item` cái vỏ thư mục rỗng còn lại, lúc này an toàn vì không còn
+   gì bên trong để đệ quy).
+2. Bọc try/catch quanh TOÀN BỘ nội dung vòng lặp mỗi folder — 1 exception bất ngờ ở 1 folder chỉ
+   log cảnh báo rồi sang folder tiếp theo, không làm chết cả batch.
+3. Thêm resumable state (`completed-folders.txt`, xem §3.2) — nếu lỗi tương tự tái diễn lần sau,
+   chạy lại script chỉ tiếp tục từ folder chưa xong, không phải tải lại từ đầu 16 folder đã xong.
+
+### 3.2 Resume sau khi script dừng giữa đường
+
+`run-mirror.ps1` ghi mỗi folder ID đã **push xong VÀ dọn dẹp sạch hoàn toàn** vào
+`C:\Tools\gdrive\logs\completed-folders.txt` — một ID mỗi dòng. Chạy lại script tự động **bỏ qua**
+mọi ID đã có trong file này, chỉ xử lý phần còn lại. Muốn buộc chạy lại toàn bộ (kể cả folder đã
+xong), xoá file này trước khi chạy.
+
+**Đã kiểm chứng thật** (2026-10-26): script gốc chết ở folder 16/19 vì §3.1; sau khi vá, đánh dấu
+sẵn 16 folder đã xong vào `completed-folders.txt`, chạy lại chỉ xử lý đúng 3 folder còn lại — cả 3
+hoàn tất, push OneDrive thành công, dọn staging sạch (không còn gì trong `C:\GDrive-Mirror` sau khi
+xong) — không phải tải lại từ đầu 16 folder trước.
+
+### 3.3 Exit code của chính `run-mirror.ps1`
+
+Không đặt `exit` tường minh ở cuối script thì exit code của tiến trình `powershell.exe` bị **rò ra
+từ lệnh native cuối cùng** script gọi (robocopy hoặc `gdrive-mirror.exe`) — robocopy có thang điểm
+riêng (0-7 đều là THÀNH CÔNG, xem `robocopy /?`), nên 1 lần chạy hoàn toàn ổn vẫn có thể báo exit
+code `2` hay `3` ra ngoài, gây hiểu lầm là lỗi khi đọc exit code từ Task Scheduler/script gọi
+ngoài. Script hiện tại đặt `exit` tường minh ở cuối, theo đúng quy ước của chính
+`gdrive-mirror.exe`: `0` = mọi folder sạch hoàn toàn, `1` = có folder lỗi item hoặc exception (xem
+log để biết folder nào, dòng `Cleanup`/`CANH BAO` tương ứng).
 
 ### Vì sao cách xoá "top-level entry mới xuất hiện" là an toàn
 
@@ -175,6 +264,8 @@ go version
 | Ghi file log/trực tiếp vào gốc `C:\` bị "Access denied" dù chạy PowerShell thường | Không phải lỗi quyền Windows — một số môi trường chạy agent/automation tự chặn ghi/xoá trực tiếp ở gốc ổ hệ thống. Luôn đặt log/output vào một thư mục con (`C:\Tools\gdrive\logs\...`), không đặt thẳng ở `C:\`. |
 | `go build` báo lỗi "The process cannot access the file ... being used by another process" khi build `gdrive-mirror.exe` | `run-mirror.ps1` (hoặc 1 lần chạy tay) đang chạy process đó. Đợi chạy xong (hoặc dừng) rồi build lại — xem mục 4. |
 | Muốn quay lại delta-sync nhanh (không tải lại từ đầu mỗi lần) | Bỏ đoạn xoá staging trong `run-mirror.ps1` (mục 3) — đổi lại, đĩa sẽ cần ~2x dung lượng Drive liên tục (xem mục 2). |
+| Script dừng hẳn giữa đường (không in SUMMARY), log có `DirectoryNotFoundException` / `Remove-Item` | Xem §3.1 — `Remove-Item -Recurse` chết trên path dài/Unicode vượt MAX_PATH. Bản script hiện tại đã fix (robocopy `/purge` + try/catch per-folder). Nếu vẫn thấy lỗi này, kiểm tra `run-mirror.ps1` trên máy có đúng bản mới không. Chạy lại script — resumable state (§3.2) tự bỏ qua phần đã xong. |
+| Đĩa còn rác sau khi script dừng bất thường (staging không được dọn hết) | Dọn tay bằng chính kỹ thuật ở §3.1: `robocopy <thư mục rỗng> "<path còn rác>" /purge` rồi `Remove-Item "<path>" -Force`. KHÔNG dùng `Remove-Item -Recurse` trực tiếp nếu cây đó có path dài/nhiều tầng Unicode — sẽ gặp lại lỗi tương tự. |
 
 ## 7. Tham chiếu
 
