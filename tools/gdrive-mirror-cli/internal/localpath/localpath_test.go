@@ -36,6 +36,41 @@ func TestSanitizeComponent_TrailingDotsAndSpaces(t *testing.T) {
 	}
 }
 
+// TestSanitizeComponent_LeadingSpace reproduces a real Drive item found
+// 2026-10-26 (" SOL24.0619 [in] PNJP E-Contract Management - Technical
+// Proposal.pptx") whose name begins with a literal space. Plain NTFS
+// happily stores that name, but SharePoint/OneDrive — reached via
+// --push-to — refuses to sync it ("Rename 1 item?... doesn't begin or end
+// with a space"), surfacing as a permanent, unresolvable "Sync issues" entry
+// until a human renames it by hand on the OneDrive side.
+func TestSanitizeComponent_LeadingSpace(t *testing.T) {
+	cases := map[string]string{
+		" report.pdf":   "report.pdf",
+		"  report.pdf":  "report.pdf",
+		" a b.pdf":      "a b.pdf", // only the LEADING space is trimmed, not an internal one
+		" report. .pdf": "report. .pdf",
+	}
+	for in, want := range cases {
+		if got := SanitizeComponent(in); got != want {
+			t.Errorf("SanitizeComponent(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestSanitizeComponent_LeadingSingleDotIsHiddenFileConventionNotTrimmed
+// guards the deliberate asymmetry: a SINGLE leading dot (".env",
+// ".gitignore"…) is an ordinary hidden-file name, not a SharePoint
+// violation (SharePoint only refuses a name starting with TWO periods) —
+// unlike the leading-space case above, it must survive untouched.
+func TestSanitizeComponent_LeadingSingleDotIsHiddenFileConventionNotTrimmed(t *testing.T) {
+	cases := []string{".env", ".gitignore", ".DS_Store"}
+	for _, in := range cases {
+		if got := SanitizeComponent(in); got != in {
+			t.Errorf("SanitizeComponent(%q) = %q, want unchanged (hidden-file convention)", in, got)
+		}
+	}
+}
+
 func TestSanitizeComponent_EmptyName(t *testing.T) {
 	if got := SanitizeComponent(""); got != "_" {
 		t.Fatalf("SanitizeComponent(\"\") = %q, want \"_\"", got)

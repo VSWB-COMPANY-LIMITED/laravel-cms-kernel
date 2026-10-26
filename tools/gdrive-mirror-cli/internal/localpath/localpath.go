@@ -78,12 +78,24 @@ func SplitExt(name string, isDir bool) (base, ext string) {
 //     (finding L2).
 //  2. Trims trailing dots/spaces — Windows silently strips these, which
 //     otherwise makes two Drive names collide invisibly ("foo" vs "foo.").
-//  3. Falls back to "_" for a name that is empty after the above — this is
+//  3. Trims a LEADING space — plain NTFS allows it (unlike the trailing
+//     case above, this isn't a Windows limitation), but SharePoint/OneDrive
+//     — this tool's real --push-to destination for most callers — refuses
+//     to sync a name starting with a space at all ("Rename 1 item?... make
+//     sure the name doesn't begin or end with a space"), surfacing as a
+//     permanent "Sync issues" entry for the human running the mirror to
+//     clean up by hand. Caught from a real Drive item 2026-10-26 ("
+//     SOL24.0619 [in] PNJP E-Contract Management - Technical
+//     Proposal.pptx"). Deliberately NOT trimming a leading single dot —
+//     that's the ordinary hidden-file convention (".env", ".gitignore"…)
+//     and perfectly fine with SharePoint, which only refuses a name
+//     starting with TWO periods.
+//  4. Falls back to "_" for a name that is empty after the above — this is
 //     what makes "." and ".." (and an all-dots/all-forbidden-chars name)
 //     land on a safe value instead of ever being returned literally as "."
 //     or ".." (which the filesystem would read as self/parent-directory,
 //     not a real name).
-//  4. Appends "_" to a Windows-reserved device name (CON, PRN, COM1…),
+//  5. Appends "_" to a Windows-reserved device name (CON, PRN, COM1…),
 //     checked on the segment before the first '.' so "CON.txt" is caught
 //     too (finding L3).
 func SanitizeComponent(name string) string {
@@ -97,6 +109,7 @@ func SanitizeComponent(name string) string {
 		b.WriteRune(r)
 	}
 	cleaned := strings.TrimRight(b.String(), ". ")
+	cleaned = strings.TrimLeft(cleaned, " ")
 
 	if cleaned == "" {
 		return "_"

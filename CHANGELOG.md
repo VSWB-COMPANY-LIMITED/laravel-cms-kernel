@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- **[gdrive-mirror-cli] `SanitizeComponent` nay cắt khoảng trắng ở ĐẦU tên, không chỉ cuối.** Phát
+  hiện thật 2026-10-26: Drive item `" SOL24.0619 [in] PNJP E-Contract Management - Technical
+  Proposal.pptx"` (khoảng trắng mở đầu) mirror xuống đúng tên gốc (NTFS cho phép) nhưng SharePoint/
+  OneDrive — đích `--push-to` thật của hầu hết người dùng — từ chối đồng bộ tên bắt đầu/kết thúc
+  bằng khoảng trắng, hiện thành mục "Sync issues" vĩnh viễn cho tới khi người thật tự đổi tên tay
+  trên OneDrive. Cố ý KHÔNG cắt 1 dấu chấm đơn ở đầu (quy ước hidden-file `.env`/`.gitignore` — vẫn
+  hợp lệ với SharePoint, chỉ cấm BẮT ĐẦU BẰNG HAI dấu chấm). Test:
+  `TestSanitizeComponent_LeadingSpace`,
+  `TestSanitizeComponent_LeadingSingleDotIsHiddenFileConventionNotTrimmed` (`localpath_test.go`).
+
 ### Added
 - **[gdrive-mirror-cli] Report `name-duplicates/<folderTag>.md` — phát hiện duplicate THẬT trên
   Drive (2 Drive ID khác nhau, tên gốc y hệt nhau), tách bạch khỏi trùng do sanitize ký tự.**
