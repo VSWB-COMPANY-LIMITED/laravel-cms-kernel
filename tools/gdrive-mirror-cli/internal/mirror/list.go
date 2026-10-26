@@ -390,7 +390,7 @@ func resolveSiblingNames(children []rawChild) []resolvedChild {
 		collided := used[origKey]
 		var duplicateOfID string
 		if collided {
-			if first, ok := firstByKey[origKey]; ok && first.name == c.name {
+			if first, ok := firstByKey[origKey]; ok && logicalName(first) == logicalName(c) {
 				duplicateOfID = first.id
 			}
 			name = disambiguate(name, c.id, used, c.isFolder)
@@ -403,6 +403,39 @@ func resolveSiblingNames(children []rawChild) []resolvedChild {
 	}
 
 	return resolved
+}
+
+// logicalName is what two DIRECT siblings are compared on to decide whether
+// their collision reflects a REAL Drive-side duplicate (worth flagging in
+// Stats.NameDuplicates / the name-duplicates report) as opposed to a mere
+// SanitizeComponent artifact (two genuinely different raw names that happen
+// to sanitize to the same local name, e.g. "a:b.pdf" and "a_b.pdf" both
+// becoming "a_b.pdf" — not a duplicate).
+//
+// For a regular file this is just its raw Drive name (already carries
+// whatever real extension it has). For a Google-native item (no real
+// extension on Drive) this is raw name + the export extension IT WILL GET —
+// so a Google Sheet titled "Dịch Vụ Hosting - Domains" and a literal
+// uploaded "Dịch Vụ Hosting - Domains.xlsx" sitting in the same folder
+// produce the IDENTICAL logicalName and are correctly caught as a real
+// duplicate (two different Drive items a human ended up with for the exact
+// same conceptual document, one native one not) — a real incident found
+// 2026-10-26, previously missed because the two raw Drive names are not
+// byte-identical (one has no extension at all).
+//
+// Two DIFFERENT logicalName values can still collide post-sanitize (the
+// artifact case above) — SanitizeComponent is applied AFTER this, so an
+// equal logicalName always implies an equal collision key, but not the
+// reverse; comparing logicalName (not the post-sanitize name) is what keeps
+// the artifact case correctly excluded.
+func logicalName(c rawChild) string {
+	if c.isFolder {
+		return c.name
+	}
+	if spec, ok := ExportMap[c.mimeType]; ok {
+		return c.name + "." + spec.Ext
+	}
+	return c.name
 }
 
 // disambiguate appends (progressively more of) the colliding item's Drive

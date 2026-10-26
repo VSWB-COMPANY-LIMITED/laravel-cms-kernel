@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### Fixed
+- **[gdrive-mirror-cli] `name-duplicates` nay bắt đúng case "Google-native trùng tên file thật"
+  (Sheet/Doc/Slide không đuôi mở rộng, export ra trùng tên 1 file thường cùng thư mục).** Phát hiện
+  thật 2026-10-26: Drive có cả 1 Google Sheet tên `Dịch Vụ Hosting - Domains` (native, Drive không
+  lưu đuôi mở rộng) VÀ 1 file Excel thật `Dịch Vụ Hosting - Domains.xlsx` cùng thư mục — export của
+  Sheet tự thêm `.xlsx`, trùng y hệt tên file thật. Đây là duplicate THẬT VĨNH VIỄN trên Drive (tái
+  diễn ở MỌI lần mirror, không tự hết), nhưng `resolveSiblingNames` trước đó so `c.name` (tên Drive
+  gốc, CHƯA thêm đuôi export) trực tiếp — 2 tên gốc không giống hệt byte-for-byte (`"...Domains"`
+  so với `"...Domains.xlsx"`) nên bị xếp nhầm vào loại "trùng do sanitize ký tự" (bỏ qua, không báo
+  cáo). Thêm hàm `logicalName()` (raw name + đuôi export NẾU LÀ Google-native) làm cơ sở so sánh
+  thay vì `c.name` trực tiếp — bắt đúng cả 2 loại duplicate thật (tên gốc y hệt VÀ
+  Google-native-trùng-file-thật) mà vẫn loại đúng trùng do sanitize ký tự (vì sanitize là hàm thuần
+  của chính input, 2 input khác nhau chỉ trùng SAU sanitize mới là artifact, còn `logicalName` so
+  sánh TRƯỚC sanitize). Test:
+  `TestResolveSiblingNames_GoogleNativeVsLiteralFile_IsRealDuplicate` (`list_test.go`).
 - **[gdrive-mirror-cli] `SanitizeComponent` nay cắt khoảng trắng ở ĐẦU tên, không chỉ cuối.** Phát
   hiện thật 2026-10-26: Drive item `" SOL24.0619 [in] PNJP E-Contract Management - Technical
   Proposal.pptx"` (khoảng trắng mở đầu) mirror xuống đúng tên gốc (NTFS cho phép) nhưng SharePoint/

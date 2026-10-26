@@ -284,6 +284,36 @@ func TestResolveSiblingNames_TrueDriveDuplicate_SetsDuplicateOfID(t *testing.T) 
 	}
 }
 
+// TestResolveSiblingNames_GoogleNativeVsLiteralFile_IsRealDuplicate reproduces
+// a real incident found 2026-10-26: Google Drive held BOTH a native Google
+// Sheet titled "Dịch Vụ Hosting - Domains" (no extension — Drive doesn't
+// store one for native types) AND a literal uploaded
+// "Dịch Vụ Hosting - Domains.xlsx". The Sheet's export adds ".xlsx",
+// colliding with the literal file's own name exactly. Earlier this package
+// compared raw c.name directly and missed this case (the two raw Drive
+// names are not byte-identical), silently reporting it as a mere
+// sanitize-artifact collision — not flagged for a human to review — even
+// though it is a genuine, permanent Drive-side duplicate that regenerates on
+// EVERY mirror run (the native Sheet's export isn't going away on its own).
+func TestResolveSiblingNames_GoogleNativeVsLiteralFile_IsRealDuplicate(t *testing.T) {
+	resolved := resolveSiblingNames([]rawChild{
+		{id: "idAAAAAAAAAAAAAAAAAAAA", name: "Dịch Vụ Hosting - Domains", mimeType: "application/vnd.google-apps.spreadsheet"},
+		{id: "idBBBBBBBBBBBBBBBBBBBB", name: "Dịch Vụ Hosting - Domains.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+	})
+
+	var kept, renamed resolvedChild
+	for _, r := range resolved {
+		if r.collided {
+			renamed = r
+		} else {
+			kept = r
+		}
+	}
+	if renamed.duplicateOfID != kept.id {
+		t.Fatalf("Google-native-vs-literal-file collision not flagged as a real duplicate: renamed.duplicateOfID=%q, want %q (kept.id)", renamed.duplicateOfID, kept.id)
+	}
+}
+
 // TestResolveSiblingNames_SanitizeArtifactCollision_DoesNotSetDuplicateOfID is
 // the necessary counterpart: two DIFFERENT original Drive names that merely
 // SANITIZE to the same local name (a ':' becoming '_') must still collide
