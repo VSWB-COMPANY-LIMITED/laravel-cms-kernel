@@ -286,8 +286,8 @@ func (s *Syncer) incrementalStateDir() string {
 
 // tryRunIncremental attempts the Drive-Changes-API delta path for the
 // current folder. handled=false tells the caller (Run) there is no usable
-// prior state — a normal full listing follows, which will also bootstrap
-// this state for next time (see bootstrapIncrementalManifest). A missing,
+// prior state — a normal full listing follows, which will also persist
+// this state for next time (see persistItemIndex). A missing,
 // corrupt, or now-invalid (e.g. Drive says the token expired) manifest all
 // fall back this way — --incremental never turns "no/bad prior state" into
 // a fatal error, mirroring the shrink guard's identical policy for
@@ -361,18 +361,54 @@ func (s *Syncer) tryRunIncremental(ctx context.Context, started time.Time) (hand
 	return true, stats, err
 }
 
-// bootstrapIncrementalManifest builds and saves the FIRST IncrementalManifest
-// for a folder right after a normal full listing completes (and the shrink
-// guard accepted it) — the full listing already visited every item, so this
-// is pure bookkeeping, one extra Changes API call (GetStartPageToken) to
-// know where "now" is for the next --incremental run. Failure here is
-// logged and otherwise ignored: it only means the NEXT run falls back to a
-// full listing again (self-healing), never a reason to fail THIS run.
-func (s *Syncer) bootstrapIncrementalManifest(ctx context.Context, items []Item, localPrefix string) {
-	token, err := s.srv.Changes.GetStartPageToken().Context(ctx).SupportsAllDrives(true).Do()
-	if err != nil {
-		s.logWarn("Incremental: không lấy được start page token — lần chạy sau (nếu dùng --incremental) sẽ vẫn liệt kê đầy đủ: %v", err)
-		return
+// loadRenameIndex reads this folder's persisted Drive-ID -> local-path index
+// (the same file --incremental's own manifest uses) for THIS run's rename/
+// move detection in buildPlan (see Syncer.applyKnownRename). Deliberately
+// independent of cfg.Incremental: even a run that never uses --incremental
+// benefits from knowing where an item used to live, so a Drive-side rename
+// can be applied as a local move instead of leaving a stale duplicate
+// behind. A missing/corrupt file (first run ever, or an index that predates
+// this feature) just yields an empty index — nothing to detect, not an
+// error, identical to today's behavior before this existed.
+func (s *Syncer) loadRenameIndex() map[string]report.ManifestEntry {
+	folderTag := report.FolderTag([]string{s.cfg.FolderID})
+	m := report.ReadIncrementalManifest(s.incrementalStateDir(), folderTag)
+	if m == nil {
+		return map[string]report.ManifestEntry{}
+	}
+	return m.Items
+}
+
+// persistItemIndex saves/refreshes the Drive-ID -> local-path index for this
+// folder right after a normal full listing completes (and the shrink guard
+// accepted it) — called UNCONDITIONALLY (not just under --incremental),
+// since buildPlan's rename detection (applyKnownRename) depends on it
+// regardless of that flag. The index is stored in the same file
+// --incremental's own manifest uses (report.IncrementalManifest), so the
+// two features share one on-disk index instead of keeping two.
+//
+// The Changes API page token --incremental needs is only fetched (one extra
+// API call) when cfg.Incremental is actually on; otherwise this preserves
+// whatever token (if any) was already on disk, untouched, so turning
+// --incremental on later still bootstraps correctly from this same write.
+// Failure here is logged and otherwise ignored: it only means the NEXT run
+// has no/a stale index to compare against (self-healing — rename detection
+// just finds no match that time), never a reason to fail THIS run.
+func (s *Syncer) persistItemIndex(ctx context.Context, items []Item, localPrefix string) {
+	folderTag := report.FolderTag([]string{s.cfg.FolderID})
+	dir := s.incrementalStateDir()
+
+	token := ""
+	if prev := report.ReadIncrementalManifest(dir, folderTag); prev != nil {
+		token = prev.StartPageToken
+	}
+	if s.cfg.Incremental {
+		t, err := s.srv.Changes.GetStartPageToken().Context(ctx).SupportsAllDrives(true).Do()
+		if err != nil {
+			s.logWarn("Incremental: không lấy được start page token — lần chạy sau (nếu dùng --incremental) sẽ vẫn liệt kê đầy đủ: %v", err)
+		} else {
+			token = t.StartPageToken
+		}
 	}
 
 	entries := make(map[string]report.ManifestEntry, len(items))
@@ -383,13 +419,12 @@ func (s *Syncer) bootstrapIncrementalManifest(ctx context.Context, items []Item,
 	m := report.IncrementalManifest{
 		FolderID:       s.cfg.FolderID,
 		LocalPrefix:    localPrefix,
-		StartPageToken: token.StartPageToken,
+		StartPageToken: token,
 		Items:          entries,
 	}
-	folderTag := report.FolderTag([]string{s.cfg.FolderID})
-	if err := report.WriteIncrementalManifest(s.incrementalStateDir(), folderTag, m); err != nil {
-		s.logWarn("Incremental: không ghi được manifest: %v", err)
+	if err := report.WriteIncrementalManifest(dir, folderTag, m); err != nil {
+		s.logWarn("Không ghi được chỉ mục ID Drive -> đường dẫn local: %v", err)
 		return
 	}
-	s.logf("Incremental: đã lưu manifest (%d item) + page token — lần chạy sau với --incremental sẽ chỉ hỏi Drive \"có gì đổi\".", len(entries))
+	s.logf("Đã lưu chỉ mục %d item (ID Drive -> đường dẫn local) — dùng để tự dời file/folder theo Drive khi bị đổi tên, và cho --incremental lần sau nếu dùng.", len(entries))
 }

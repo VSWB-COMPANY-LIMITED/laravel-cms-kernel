@@ -79,6 +79,12 @@ func (s *Syncer) RunRetry(ctx context.Context, items []Item, folderIDs []string,
 		return s.stats, err
 	}
 
+	// Same rename-detection index a normal Run() loads — see loadRenameIndex
+	// doc. Loaded here too (not persisted afterward: items is only the
+	// retried SUBSET, writing that back as the folder's full index would
+	// lose every entry for everything that already succeeded before).
+	s.renameIndex = s.loadRenameIndex()
+
 	prefix := s.resolveRetryPrefix(ctx, localPrefix)
 
 	s.stats.TotalListed = len(items)

@@ -3,6 +3,32 @@
 ## [Unreleased]
 
 ### Added
+- **[gdrive-mirror-cli] Rename/move tracking — tự dời file/folder local theo Drive, không sinh
+  duplicate khi Google Doc/Sheet/Slide bị đổi tên.** Trước đây khi 1 item đổi tên trên Drive (cùng
+  ID, tên mới), lần mirror sau tạo file local tên mới nhưng KHÔNG xoá file cũ (tool không bao giờ
+  xoá local) → 2 file cùng nội dung, chỉ khác tên, nằm cạnh nhau — dễ gặp và dễ nhầm nhất với
+  export Google-native (`.docx`/`.xlsx`/`.pptx`...) vì cả 2 bản trông như file Office thật.
+  `buildPlan` nay tra 1 chỉ mục Drive-ID → đường-dẫn-local-lần-trước (file JSON dùng chung với
+  manifest `--incremental`, nhưng được ghi ở **mọi** lần chạy, không riêng khi bật
+  `--incremental`); phát hiện ID cũ ở path khác → `os.Rename` tại chỗ sang path mới (không tải
+  lại) thay vì tải mới + bỏ mặc bản cũ. Đổi tên 1 folder dời nguyên cả cây con trong 1 lệnh (nhờ
+  thứ tự liệt kê depth-first, folder luôn đứng trước con). Mọi tình huống không chắc (bản cũ đã
+  mất, đích đã có file, 2 đường dẫn khác ổ đĩa khiến rename lỗi) rơi về hành vi cũ — không bao giờ
+  ghi đè/xoá. `internal/mirror/sync.go::applyKnownRename/loadRenameIndex`,
+  `internal/mirror/incremental.go::persistItemIndex` (đổi tên từ `bootstrapIncrementalManifest`,
+  bỏ điều kiện `cfg.Incremental` cho việc lưu chỉ mục — chỉ còn gate phần gọi Changes API riêng
+  của `--incremental`). Summary cuối run có thêm dòng `Renamed`. Test:
+  `TestBuildPlan_KnownRename_*` (`sync_test.go`).
+- **[gdrive-mirror-cli] `--scan-duplicates` — quét phát hiện duplicate đã tồn tại TỪ TRƯỚC khi có
+  rename-tracking.** Rename-tracking (mục trên) chỉ chặn duplicate MỚI từ nay — cây đã mirror từ
+  trước (hoặc 1 lần chạy lỗi giữa đường) có thể đã có sẵn file mồ côi. Cờ mới, chạy thay cho 1 lần
+  sync bình thường, chỉ liệt kê Drive + quét `--path`, KHÔNG tải/di chuyển/xoá gì. Chia 2 nhóm:
+  "xác nhận trùng" (MD5 local khớp đúng MD5 Drive đang báo cho 1 item hiện tại — chỉ khả thi với
+  file thường, Google-native không có MD5 từ Drive để so) và "nghi ngờ — cần tự soát" (không khớp
+  được bằng MD5, có gợi ý cùng-thư-mục-cùng-đuôi khi tìm được nhưng không khẳng định — đúng nhóm
+  mà duplicate dạng `.docx`/`.xlsx` thường rơi vào). Không bao giờ tự xoá/di chuyển — chỉ báo cáo.
+  `internal/mirror/scan.go` (`ScanDuplicates`, `RenderDuplicateScanReport`), `main.go`. Test:
+  `scan_test.go`.
 - **[gdrive-mirror-cli] Fast-path bỏ qua hash MD5 lại cho file không đổi (delta-check).** Rà soát
   quá trình kéo dữ liệu Drive → local: với cây lớn ít thay đổi (ca phổ biến nhất — cron chạy lại
   định kỳ), `evaluateLocal` cũ luôn đọc lại TOÀN BỘ nội dung mỗi file size-khớp để tính MD5 so với

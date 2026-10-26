@@ -40,6 +40,7 @@ func run() int {
 	_ = fs.Bool("allow-cloud-sync-path", false, "Deprecated no-op: running inside a cloud-sync folder is now the default (with a warning). Kept so existing scripts keep working")
 	incrementalFlag := fs.Bool("incremental", false, "Use the Drive Changes API for delta sync once a folder has one full listing on record — later runs only re-list folders Drive reports as changed, instead of the whole tree. Self-bootstrapping: first run per folder is always a full listing")
 	pushToFlag := fs.String("push-to", "", "After the run, push --path's current contents into this SECOND directory (typically a live OneDrive/Google Drive/Dropbox folder) as one bounded, non-destructive, only-what-changed copy — the safe way to end up with a mirror inside a cloud-sync folder without --path itself living there. Windows: uses robocopy; other OSes: a built-in Go copier. See README")
+	scanDuplicatesFlag := fs.Bool("scan-duplicates", false, "Read-only report: list local files under --path no longer matched by the current Drive listing (e.g. left behind by a Drive-side rename from before rename-tracking applied, or from a run that failed partway). Content-matched against current items' MD5 when possible (reported as confirmed); otherwise listed for manual review, since Google-native exports (.docx/.xlsx/.pptx/...) have no Drive MD5 to match against. Never deletes or moves anything — runs instead of a normal sync")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s <folderID> [<folderID> ...] --path=<dir> [flags]\n", os.Args[0])
@@ -107,6 +108,14 @@ func run() int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *scanDuplicatesFlag {
+		if len(folderIDs) == 0 {
+			fmt.Fprintln(os.Stderr, "error: --scan-duplicates cần ít nhất 1 <folderID> (giống lệnh sync thường)")
+			return 2
+		}
+		return runScanDuplicates(ctx, baseCfg, folderIDs)
+	}
 
 	if *retryFailedFlag != "" {
 		return maybePush(ctx, baseCfg, runRetryFailed(ctx, baseCfg, *retryFailedFlag, *includePermanentFlag))
@@ -250,6 +259,41 @@ func aggregateExitCode(results []folderRunResult) int {
 		}
 	}
 	return 0
+}
+
+// runScanDuplicates implements --scan-duplicates: a read-only pass per
+// folder ID that never downloads/moves/deletes anything — see
+// mirror.ScanDuplicates doc. Exit code 1 when any folder has something to
+// review (confirmed or suspected), so a cron/script notices without a
+// human having to read the output every time; 2 only for a hard failure
+// (listing/credentials), matching the rest of this CLI's exit-code
+// conventions.
+func runScanDuplicates(ctx context.Context, baseCfg mirror.Config, folderIDs []string) int {
+	exitCode := 0
+	for _, id := range folderIDs {
+		cfg := baseCfg
+		cfg.FolderID = id
+
+		syncer, err := mirror.New(ctx, cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+			return 1
+		}
+
+		result, err := syncer.ScanDuplicates(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "--scan-duplicates lỗi cho folder %s: %v\n", id, err)
+			exitCode = 1
+			continue
+		}
+
+		fmt.Printf("--- Folder %s ---\n", id)
+		fmt.Println(mirror.RenderDuplicateScanReport(result, cfg.Path))
+		if len(result.Confirmed) > 0 || len(result.Suspected) > 0 {
+			exitCode = 1
+		}
+	}
+	return exitCode
 }
 
 // runRetryFailed implements --retry-failed: load a prior run's failed-items

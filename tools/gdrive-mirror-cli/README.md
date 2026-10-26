@@ -64,6 +64,7 @@ gdrive-mirror --retry-failed=<report.json|dir> --path=<local_dir> [flags]
 | `--ignore-shrink`      | `false`                                                          | Skip the listing shrink-guard abort — only when you deliberately deleted a lot on Drive (PHP source's equivalent flag is `--allow-shrink`) |
 | `--forbid-cloud-sync-path` | `false` | Refuse to run when `--path` is inside a folder a live cloud-sync client (OneDrive/Google Drive/Dropbox/iCloud) is watching. Default: only log a warning and continue. `--allow-cloud-sync-path` is a deprecated no-op kept for old scripts — see "Mirror thẳng vào thư mục cloud-sync sống" below |
 | `--push-to`            | *(unset)*                                                        | After the run, push `--path`'s current contents into this SECOND directory (typically a live OneDrive/Google Drive/Dropbox folder) as one bounded, non-destructive, only-what-changed copy — the recommended way to end up with a mirror inside a cloud-sync folder. See "Không mirror thẳng vào thư mục cloud-sync sống" below |
+| `--scan-duplicates`    | `false`                                                          | Read-only: runs instead of a normal sync. Lists local files under `--path` the current Drive listing no longer accounts for (e.g. left over from a Drive-side rename before rename-tracking existed, or a run that failed partway). Never deletes/moves anything — see "Phát hiện duplicate đã có từ trước" below |
 
 One or more `<folderID>` arguments may be given — each folder is synced
 independently, sequentially, with its own local subfolder and its own
@@ -189,11 +190,38 @@ hoặc Changes API lỗi → tool tự quay về liệt kê đầy đủ lần �
 và tự bootstrap lại state cho lần sau — an toàn để bật/tắt `--incremental` tuỳ ý giữa các lần
 chạy.
 
+Cùng file này cũng được **ghi ở mọi lần chạy** (không riêng khi bật `--incremental`) để phục vụ
+rename-tracking — xem "Rename/move tracking" trong mục Behavior bên dưới.
+
 **Giới hạn đã biết:** một folder ĐANG ĐƯỢC THEO DÕI mà chính nó bị đổi tên/di chuyển sẽ được xử
 lý đúng (tool tự phát hiện đường dẫn cũ trong manifest không khớp nữa và liệt kê lại đúng những
 folder bị ảnh hưởng theo tầng, không phải toàn cây) — nhưng cơ chế này thêm một số request phụ so
 với trường hợp chỉ thêm/xoá/sửa file thường. Với một cây ít khi tự đổi cấu trúc thư mục gốc (phổ
 biến cho mirror backup định kỳ), chi phí này không đáng kể.
+
+## Phát hiện duplicate đã có từ trước — `--scan-duplicates`
+
+Rename-tracking (mục Behavior bên dưới) chỉ ngăn duplicate **từ nay về sau**. Một cây đã mirror
+trước khi tính năng này tồn tại (hoặc một lần chạy từng bị lỗi giữa đường) có thể đã có sẵn file
+local mồ côi — ví dụ 1 Google Doc đổi tên trên Drive, local còn `OldName.docx` VÀ `NewName.docx`
+cùng nằm đó.
+
+```bash
+gdrive-mirror <folderID> --path=/Volumes/WD-DATA1/GDrive-Mirror --scan-duplicates
+```
+
+Chạy **thay cho** 1 lần sync bình thường — chỉ liệt kê Drive + quét `--path`, **không tải/di
+chuyển/xoá gì**. Kết quả chia 2 nhóm:
+
+- **XÁC NHẬN TRÙNG**: MD5 của file local khớp đúng với MD5 Drive đang báo cho 1 item hiện tại —
+  chỉ có thể với file thường (regular file); an toàn để xoá tay.
+- **NGHI NGỜ — CẦN TỰ SOÁT**: không khớp được bằng MD5 (file Google-native — Docs/Sheets/Slides/
+  Drawings/Script — **không có MD5 từ Drive** để so, nên nhóm này gần như luôn là nơi duplicate
+  dạng `.docx`/`.xlsx`/`.pptx` rơi vào). Có gợi ý (cùng thư mục + cùng đuôi với 1 item hiện tại)
+  khi tìm được, nhưng KHÔNG khẳng định — tự mở so sánh trước khi xoá.
+
+Exit code `1` khi có bất kỳ phát hiện nào (để cron/script nhận biết không cần đọc log), `0` khi
+sạch.
 
 ## Behavior (ported from the PHP source — see its docblock for the full story)
 
@@ -211,7 +239,28 @@ biến cho mirror backup định kỳ), chi phí này không đáng kể.
 - **Google-native → Office**: Docs→docx, Sheets→xlsx, Slides→pptx,
   Drawings→png, Apps Script→json. Shortcuts are skipped (pointers only —
   their target is a separate listed item). Any other native type
-  (Forms/Sites/Maps/Jamboard…) fails permanent `fileNotDownloadable`.
+  (Forms/Sites/Maps/Jamboard…) fails permanent `fileNotDownloadable`. A
+  Google-native file's export name colliding with a sibling's literal name
+  (e.g. a Doc titled "Report" exporting to `Report.docx` next to a real
+  uploaded `Report.docx`) is caught by the SAME shared-namespace dedup every
+  other sibling collision goes through (`list.go::resolveSiblingNames`) —
+  the extension is appended BEFORE the collision key is computed, so this
+  can never silently produce two files racing for one name.
+- **Rename/move tracking** (mọi loại file, không riêng Google-native):
+  `buildPlan` giữ một chỉ mục Drive-ID → đường-dẫn-local-lần-trước (file
+  JSON ở `<reportDir>/incremental/<folderTag>.json`, dùng chung với
+  `--incremental`, nhưng được duy trì ở **mọi** lần chạy, không riêng khi
+  bật `--incremental`). Khi một item đổi tên/di chuyển trên Drive (cùng ID,
+  path mới khác path cũ), và bản local cũ còn tồn tại mà đích mới chưa có
+  gì, tool **di chuyển tại chỗ** (`os.Rename`) bản local sang tên/vị trí
+  mới thay vì tải bản mới và để lại bản cũ — tránh đúng kiểu duplicate dễ
+  gặp nhất với file Google-native (Doc/Sheet/Slide đổi tên → 2 file `.docx`/
+  `.xlsx` cùng nội dung, chỉ khác tên, nằm cạnh nhau). Đổi tên một **folder**
+  dời nguyên cả cây con trong một lệnh. Mọi tình huống không chắc chắn
+  (bản cũ đã mất, đích đã có file, hoặc hai đường dẫn nằm trên 2 ổ đĩa khác
+  nhau khiến `os.Rename` lỗi) đều rơi về hành vi cũ (tải mới, giữ bản cũ) —
+  không bao giờ ghi đè/xoá gì. Hiển thị trong summary cuối run dòng
+  `Renamed (dời theo Drive, không tải lại): N` khi có áp dụng.
 - **Error classification** (`internal/classify`): permanent errors (403
   reasons like `exportSizeLimitExceeded`, `cannotExportFile`,
   `insufficientFilePermissions`…) are never retried; everything else

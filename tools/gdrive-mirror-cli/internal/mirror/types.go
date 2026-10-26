@@ -128,4 +128,9 @@ type Stats struct {
 	// disk itself is likely dead, so trying the next folder is pointless.
 	Aborted     bool
 	AbortReason string
+
+	// RenamesApplied counts items whose local file/folder was moved to
+	// follow a detected Drive-side rename/move instead of leaving a stale
+	// duplicate under the old name — see Syncer.applyKnownRename.
+	RenamesApplied int
 }

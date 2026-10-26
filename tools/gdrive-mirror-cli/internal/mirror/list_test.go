@@ -111,6 +111,40 @@ func TestResolveSiblingNames_ExportExtensionAppended(t *testing.T) {
 	}
 }
 
+// TestResolveSiblingNames_ExportExtensionCollidesWithLiteralFile covers the
+// exact duplicate-generation risk a Google-native export introduces: a
+// Google Doc titled "Report" exports to "Report.docx" — if the SAME folder
+// also has a real, literal "Report.docx" uploaded by someone (same Drive
+// mimeType-wise two completely different items, but same eventual local
+// name), these must be caught as ONE collision, not silently produce
+// "Report.docx" twice (one overwriting/racing the other, or one becoming an
+// orphan after this run flips which one wins). The extension must be
+// appended BEFORE the collision key is computed for this to work — verified
+// here, not just by reading list.go's call order.
+func TestResolveSiblingNames_ExportExtensionCollidesWithLiteralFile(t *testing.T) {
+	children := []rawChild{
+		{id: "docIDaaaaaaaaaaaaaaaaa", name: "Report", mimeType: "application/vnd.google-apps.document"},
+		{id: "fileIDbbbbbbbbbbbbbbbb", name: "Report.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+	}
+	resolved := resolveSiblingNames(children)
+
+	seen := map[string]bool{}
+	collidedCount := 0
+	for _, r := range resolved {
+		key := strings.ToLower(r.localName)
+		if seen[key] {
+			t.Fatalf("Google Doc export name and literal file name both resolved to %q — duplicate/overwrite risk", r.localName)
+		}
+		seen[key] = true
+		if r.collided {
+			collidedCount++
+		}
+	}
+	if collidedCount != 1 {
+		t.Fatalf("expected exactly 1 collided entry (the export-vs-literal name clash), got %d", collidedCount)
+	}
+}
+
 func TestResolveSiblingNames_TruncatesLongExportName(t *testing.T) {
 	longName := strings.Repeat("a", 300)
 	children := []rawChild{

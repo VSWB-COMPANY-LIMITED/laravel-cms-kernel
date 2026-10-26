@@ -48,6 +48,14 @@ type Syncer struct {
 	localPrefix    string
 	processedCount atomic.Int64
 	totalFileTasks int
+
+	// renameIndex is this folder's Drive-ID -> last-known-local-path index,
+	// loaded once at the start of Run()/RunRetry() (see loadRenameIndex) and
+	// read by buildPlan's applyKnownRename to detect a Drive-side rename/
+	// move and migrate the local copy instead of leaving a stale duplicate
+	// under its old name. nil/empty means "nothing known" — every lookup
+	// just misses, identical to today's behavior before this existed.
+	renameIndex map[string]report.ManifestEntry
 }
 
 // fileTask is a planned download: the Drive item plus its fully resolved
@@ -138,15 +146,23 @@ func (s *Syncer) Run(ctx context.Context) (Stats, error) {
 		return s.stats, err
 	}
 
+	// Loaded unconditionally (not just under --incremental): buildPlan uses
+	// this to detect a Drive-side rename/move (same ID, different path) and
+	// move the local file/folder to follow it instead of leaving a stale
+	// duplicate behind under its old name — see applyKnownRename. A
+	// missing/corrupt file (first run ever, or an index that predates this
+	// feature) just yields no matches, never an error.
+	s.renameIndex = s.loadRenameIndex()
+
 	if s.cfg.Incremental {
 		if handled, stats, err := s.tryRunIncremental(ctx, started); handled {
 			return stats, err
 		}
 		// handled=false: no usable prior manifest (first run for this
 		// folder, corrupt state, or a Changes API failure) — fall through
-		// to the normal full listing below, which also bootstraps the
-		// manifest for the NEXT --incremental run (see the
-		// bootstrapIncrementalManifest call after the shrink guard).
+		// to the normal full listing below, which also (re)persists the
+		// item index for the NEXT run (see the persistItemIndex call after
+		// the shrink guard).
 	}
 
 	// The synced folder's own name comes straight from Drive and needs the
@@ -180,8 +196,12 @@ func (s *Syncer) Run(ctx context.Context) (Stats, error) {
 		return s.stats, nil
 	}
 
-	if s.cfg.Incremental && !s.cfg.DryRun {
-		s.bootstrapIncrementalManifest(ctx, items, localPrefix)
+	// Unconditional (not just under --incremental): every successful full
+	// listing refreshes the Drive-ID -> local-path index buildPlan's rename
+	// detection depends on, regardless of whether --incremental is also in
+	// use. See persistItemIndex doc.
+	if !s.cfg.DryRun {
+		s.persistItemIndex(ctx, items, localPrefix)
 	}
 
 	return s.runTasksAndReport(ctx, items, localPrefix, folderIDs, started)
@@ -362,6 +382,8 @@ func (s *Syncer) buildPlan(items []Item, localPrefix string) []fileTask {
 			continue
 		}
 
+		s.applyKnownRename(it, absPath, localPrefix)
+
 		if it.Type == "dir" {
 			if err := os.MkdirAll(absPath, 0o755); err != nil {
 				s.recordDirFailure(it, err)
@@ -407,6 +429,73 @@ func (s *Syncer) buildPlan(items []Item, localPrefix string) []fileTask {
 	}
 
 	return tasks
+}
+
+// applyKnownRename checks whether it (file OR folder — both go through the
+// same shared Drive-ID index) was seen at a DIFFERENT local path in a prior
+// run, and if so, moves the existing local file/directory to absPath
+// instead of leaving it behind: a Drive-side rename only ever touches ONE
+// source item, so leaving the old local copy in place after creating a new
+// one under the new name would turn 1 Drive item into 2 local files/trees —
+// exactly the duplicate this exists to prevent (see README "Google-native
+// export rename" / the rename-tracking design discussion).
+//
+// Only acts when it is unambiguous and loses nothing:
+//   - the OLD local path still exists (nothing to move otherwise — already
+//     moved, never downloaded, or deleted by the user)
+//   - the NEW local path does NOT already exist (never overwrite anything
+//     that's already there — that path's normal plan/delta-check handles it)
+//
+// Any other situation (ambiguous, or os.Rename itself fails — e.g. the old
+// and new paths resolve onto different filesystems, EXDEV) falls through to
+// the ordinary behavior that existed before this feature: mkdir/download
+// proceeds under the new name, and the old copy is simply left in place.
+// This can never make a run WORSE than before — only better when the move
+// is safe to make.
+//
+// For a renamed FOLDER, moving it here (when buildPlan reaches that
+// directory's own Item, which — by listing order — always comes before any
+// of its descendants') relocates its entire subtree in ONE os.Rename.
+// Every descendant Item processed afterward then finds its OWN recorded old
+// path already gone (the parent directory just moved out from under it),
+// so its own lookup here becomes a safe no-op and buildPlan's normal
+// dir/file handling takes over, discovering the content is already
+// correctly placed — no redundant per-file work, no re-download.
+func (s *Syncer) applyKnownRename(it Item, absPath string, localPrefix string) {
+	if it.ID == "" || s.cfg.DryRun {
+		return
+	}
+	old, ok := s.renameIndex[it.ID]
+	if !ok || old.Path == it.Path {
+		return
+	}
+
+	oldAbsPath, err := localpath.SafeJoin(s.cfg.Path, filepath.Join(localPrefix, filepath.FromSlash(old.Path)))
+	if err != nil {
+		// A malformed path recorded in a PAST run's index must never block
+		// or corrupt THIS item's normal processing — just skip the move.
+		return
+	}
+	if _, statErr := os.Stat(oldAbsPath); statErr != nil {
+		return // nothing there to move
+	}
+	if _, statErr := os.Stat(absPath); statErr == nil {
+		return // destination already occupied — never overwrite
+	}
+
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		s.logWarn("Rename-tracking: không tạo được thư mục cha cho %s, bỏ qua di chuyển (sẽ tải mới): %v", it.Path, err)
+		return
+	}
+	if err := os.Rename(oldAbsPath, absPath); err != nil {
+		s.logWarn("Rename-tracking: không dời được %s -> %s (có thể nằm trên 2 ổ đĩa khác nhau), giữ bản cũ, sẽ tải mới ở tên mới: %v", old.Path, it.Path, err)
+		return
+	}
+
+	s.mu.Lock()
+	s.stats.RenamesApplied++
+	s.mu.Unlock()
+	s.logf("Phát hiện đổi tên/di chuyển trên Drive (id=%s): đã dời local %q -> %q (không tải lại).", it.ID, old.Path, it.Path)
 }
 
 func (s *Syncer) recordDirFailure(it Item, err error) {
@@ -681,6 +770,9 @@ func (s *Syncer) printSummary(duration time.Duration) {
 	fmt.Printf("Files Updated:       %d\n", s.stats.Updated)
 	fmt.Printf("Files Skipped:       %d\n", s.stats.Skipped)
 	fmt.Printf("Collisions:          %d\n", s.stats.Collisions)
+	if s.stats.RenamesApplied > 0 {
+		fmt.Printf("Renamed (dời theo Drive, không tải lại): %d\n", s.stats.RenamesApplied)
+	}
 	fmt.Printf("Errors:              %d (permanent: %d, retryable: %d)\n", s.stats.Errors, permanentCount, retryableCount)
 	if s.stats.Aborted {
 		fmt.Printf("Aborted:             true (%s)\n", s.stats.AbortReason)
