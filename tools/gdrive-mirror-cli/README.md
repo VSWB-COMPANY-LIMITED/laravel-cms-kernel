@@ -97,6 +97,10 @@ Step-by-step sample commands per OS (macOS / Linux / Windows) — including
 dry-run → limited test → full run, scheduling (cron/launchd/systemd/Task
 Scheduler), and troubleshooting: **[RUN-SAMPLES.md](RUN-SAMPLES.md)**.
 
+Vận hành thật trên máy Windows đĩa hạn chế, đích cuối là OneDrive (chiến lược
+lặp từng folder + `--push-to` + tự xoá staging, build-lại/troubleshooting cho
+máy vận hành cụ thể): **[OPERATIONS-ONEDRIVE.md](OPERATIONS-ONEDRIVE.md)**.
+
 ## 🔴 Mirror thẳng vào thư mục cloud-sync sống (OneDrive/Google Drive/Dropbox/iCloud)
 
 **Sự cố thật đã xảy ra:** `--path` được trỏ thẳng vào `C:\Users\<user>\OneDrive - <org>` (gốc
