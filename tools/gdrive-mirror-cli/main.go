@@ -36,7 +36,8 @@ func run() int {
 	retryFailedFlag := fs.String("retry-failed", "", "Path to a failed-*.json report (or the directory containing it — newest is picked) to re-run instead of listing Drive again")
 	includePermanentFlag := fs.Bool("include-permanent", false, "With --retry-failed, also retry items marked permanent (default: skipped — they cannot self-heal)")
 	ignoreShrinkFlag := fs.Bool("ignore-shrink", false, "Skip the listing shrink-guard abort — use only when you deliberately deleted a lot of files/folders on Drive")
-	allowCloudSyncPathFlag := fs.Bool("allow-cloud-sync-path", false, "Allow --path to be inside a folder a live cloud-sync client (OneDrive/Google Drive/Dropbox/iCloud) is watching — OFF by default because this causes runaway numbered-duplicate files on the other client's side (see README)")
+	forbidCloudSyncPathFlag := fs.Bool("forbid-cloud-sync-path", false, "Refuse to run when --path is inside a folder a live cloud-sync client (OneDrive/Google Drive/Dropbox/iCloud) is watching. Default: only warn and continue (the risk is runaway numbered-duplicate files on the other client's side, see README)")
+	_ = fs.Bool("allow-cloud-sync-path", false, "Deprecated no-op: running inside a cloud-sync folder is now the default (with a warning). Kept so existing scripts keep working")
 	incrementalFlag := fs.Bool("incremental", false, "Use the Drive Changes API for delta sync once a folder has one full listing on record — later runs only re-list folders Drive reports as changed, instead of the whole tree. Self-bootstrapping: first run per folder is always a full listing")
 	pushToFlag := fs.String("push-to", "", "After the run, push --path's current contents into this SECOND directory (typically a live OneDrive/Google Drive/Dropbox folder) as one bounded, non-destructive, only-what-changed copy — the safe way to end up with a mirror inside a cloud-sync folder without --path itself living there. Windows: uses robocopy; other OSes: a built-in Go copier. See README")
 
@@ -90,18 +91,18 @@ func run() int {
 	}
 
 	baseCfg := mirror.Config{
-		Path:               absPath,
-		CredsFile:          credsFile,
-		Retry:              *retryFlag,
-		Force:              *forceFlag,
-		DryRun:             *dryRunFlag,
-		Limit:              *limitFlag,
-		Concurrency:        *concurrencyFlag,
-		ListConcurrency:    *listConcurrencyFlag,
-		IgnoreShrink:       *ignoreShrinkFlag,
-		AllowCloudSyncPath: *allowCloudSyncPathFlag,
-		Incremental:        *incrementalFlag,
-		PushTo:             *pushToFlag,
+		Path:                absPath,
+		CredsFile:           credsFile,
+		Retry:               *retryFlag,
+		Force:               *forceFlag,
+		DryRun:              *dryRunFlag,
+		Limit:               *limitFlag,
+		Concurrency:         *concurrencyFlag,
+		ListConcurrency:     *listConcurrencyFlag,
+		IgnoreShrink:        *ignoreShrinkFlag,
+		ForbidCloudSyncPath: *forbidCloudSyncPathFlag,
+		Incremental:         *incrementalFlag,
+		PushTo:              *pushToFlag,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

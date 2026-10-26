@@ -75,18 +75,16 @@ type Config struct {
 	// than the download concurrency without issue.
 	ListConcurrency int
 
-	// AllowCloudSyncPath bypasses the preflight check that refuses to run
-	// when --path resolves inside a folder a THIRD-PARTY cloud-sync
-	// client (OneDrive/Google Drive/Dropbox/iCloud desktop app) is
-	// actively watching — see cloudsync.Detect. Off by default: mirroring
-	// straight into such a folder means two independent sync engines
-	// fight over the same files, and this tool's atomic
-	// download-then-rename is exactly the pattern that makes the OTHER
-	// client mistake an unrelated-but-identical rewrite for a conflicting
-	// edit and spawn "name-2.ext", "name-3.ext"... duplicates that grow by
-	// one every run (real incident, see README "Không mirror thẳng vào
-	// thư mục cloud-sync sống").
-	AllowCloudSyncPath bool
+	// ForbidCloudSyncPath makes the preflight REFUSE to run when --path
+	// resolves inside a folder a THIRD-PARTY cloud-sync client
+	// (OneDrive/Google Drive/Dropbox/iCloud desktop app) is actively
+	// watching — see cloudsync.Detect. Off by default: preflight only logs
+	// a warning and continues. The risk being warned about: this tool's
+	// atomic download-then-rename can make the OTHER client mistake an
+	// identical rewrite for a conflicting edit and spawn "name-2.ext",
+	// "name-3.ext"... duplicates, one more every run (real incident, see
+	// README "Mirror thẳng vào thư mục cloud-sync sống").
+	ForbidCloudSyncPath bool
 
 	// Incremental turns on the Drive Changes API delta-sync path (see
 	// incremental.go): once a folder has completed one full listing under

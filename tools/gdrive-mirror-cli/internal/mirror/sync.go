@@ -245,28 +245,26 @@ func (s *Syncer) preflight() error {
 		return nil
 	}
 
-	// Checked BEFORE MkdirAll/WriteProbe below — this must fail fast,
-	// before touching the destination at all, not after it's already been
-	// created/probed. See cloudsync package doc for the real incident this
-	// guards against: mirroring straight into a live OneDrive/Google
-	// Drive/Dropbox-watched folder makes every rewrite this tool does look
-	// like a conflicting edit to the OTHER sync client, which then spawns
-	// "name-2.ext", "name-3.ext"... duplicates that grow by one every run.
-	if !s.cfg.AllowCloudSyncPath {
-		if m, ok := cloudsync.Detect(s.cfg.Path); ok {
-			basis := fmt.Sprintf("phát hiện qua tên đường dẫn (root=%s, có thể trùng ngẫu nhiên)", m.Root)
-			if m.FromEnv {
-				basis = fmt.Sprintf("khớp thư mục %s đang theo dõi qua biến môi trường (root=%s)", m.Provider, m.Root)
-			}
-			return fmt.Errorf(
-				"preflight: --path (%s) nằm trong thư mục do %s đồng bộ SỐNG — %s. "+
-					"KHÔNG mirror thẳng vào đây: mỗi lần tool tải-lại-rồi-ghi-đè (kể cả nội dung giống hệt) sẽ bị %s "+
-					"hiểu nhầm là sửa xung đột và tự đẻ bản trùng tên tăng dần (vd 'file-2.ext', 'file-3.ext'...) mỗi lần chạy. "+
-					"Hãy trỏ --path ra một thư mục THUẦN LOCAL, rồi dùng một bước copy một-chiều RIÊNG (vd `robocopy /MIR`) "+
-					"sang %s sau khi mirror xong — xem README §'Không mirror thẳng vào thư mục cloud-sync sống'. "+
-					"Nếu bạn CHẮC CHẮN muốn tiếp tục bất chấp rủi ro này, thêm --allow-cloud-sync-path",
-				s.cfg.Path, m.Provider, basis, m.Provider, m.Provider)
+	// Checked BEFORE MkdirAll/WriteProbe below. See cloudsync package doc
+	// for the real incident: mirroring straight into a live OneDrive/Google
+	// Drive/Dropbox-watched folder can make every rewrite this tool does
+	// look like a conflicting edit to the OTHER sync client, which then
+	// spawns "name-2.ext", "name-3.ext"... duplicates. Warn by default;
+	// refuse only when --forbid-cloud-sync-path is set.
+	if m, ok := cloudsync.Detect(s.cfg.Path); ok {
+		basis := fmt.Sprintf("phát hiện qua tên đường dẫn (root=%s, có thể trùng ngẫu nhiên)", m.Root)
+		if m.FromEnv {
+			basis = fmt.Sprintf("khớp thư mục %s đang theo dõi qua biến môi trường (root=%s)", m.Provider, m.Root)
 		}
+		msg := fmt.Sprintf(
+			"--path (%s) nằm trong thư mục do %s đồng bộ SỐNG — %s. "+
+				"Mỗi lần tool tải-lại-rồi-ghi-đè có thể bị %s hiểu nhầm là sửa xung đột và đẻ bản trùng tên tăng dần ('file-2.ext', 'file-3.ext'...). "+
+				"Cách an toàn hơn: --path trỏ ra thư mục local thuần + --push-to (xem README §'Mirror thẳng vào thư mục cloud-sync sống')",
+			s.cfg.Path, m.Provider, basis, m.Provider)
+		if s.cfg.ForbidCloudSyncPath {
+			return fmt.Errorf("preflight: %s. Đang bật --forbid-cloud-sync-path nên dừng", msg)
+		}
+		s.logf("CẢNH BÁO: %s", msg)
 	}
 
 	if err := os.MkdirAll(s.cfg.Path, 0o755); err != nil {

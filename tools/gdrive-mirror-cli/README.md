@@ -62,7 +62,7 @@ gdrive-mirror --retry-failed=<report.json|dir> --path=<local_dir> [flags]
 | `--retry-failed`       | *(unset)*                                                        | Path to a `failed-*.json` report (or its directory — newest picked) — retries only its items, no fresh listing |
 | `--include-permanent`  | `false`                                                          | With `--retry-failed`, also retry items marked `permanent` (default: skipped — they cannot self-heal) |
 | `--ignore-shrink`      | `false`                                                          | Skip the listing shrink-guard abort — only when you deliberately deleted a lot on Drive (PHP source's equivalent flag is `--allow-shrink`) |
-| `--allow-cloud-sync-path` | `false`                                                        | Allow `--path` to be inside a folder a live cloud-sync client (OneDrive/Google Drive/Dropbox/iCloud) is watching. OFF by default — see "Không mirror thẳng vào thư mục cloud-sync sống" below for why this is refused by default and what to do instead |
+| `--forbid-cloud-sync-path` | `false` | Refuse to run when `--path` is inside a folder a live cloud-sync client (OneDrive/Google Drive/Dropbox/iCloud) is watching. Default: only log a warning and continue. `--allow-cloud-sync-path` is a deprecated no-op kept for old scripts — see "Mirror thẳng vào thư mục cloud-sync sống" below |
 | `--push-to`            | *(unset)*                                                        | After the run, push `--path`'s current contents into this SECOND directory (typically a live OneDrive/Google Drive/Dropbox folder) as one bounded, non-destructive, only-what-changed copy — the recommended way to end up with a mirror inside a cloud-sync folder. See "Không mirror thẳng vào thư mục cloud-sync sống" below |
 
 One or more `<folderID>` arguments may be given — each folder is synced
@@ -96,7 +96,7 @@ Step-by-step sample commands per OS (macOS / Linux / Windows) — including
 dry-run → limited test → full run, scheduling (cron/launchd/systemd/Task
 Scheduler), and troubleshooting: **[RUN-SAMPLES.md](RUN-SAMPLES.md)**.
 
-## 🔴 KHÔNG mirror thẳng vào thư mục cloud-sync sống (OneDrive/Google Drive/Dropbox/iCloud)
+## 🔴 Mirror thẳng vào thư mục cloud-sync sống (OneDrive/Google Drive/Dropbox/iCloud)
 
 **Sự cố thật đã xảy ra:** `--path` được trỏ thẳng vào `C:\Users\<user>\OneDrive - <org>` (gốc
 thư mục OneDrive đang đồng bộ trên máy Windows chạy tool này). Cùng những file đó, cùng kích
@@ -112,11 +112,12 @@ OneDrive đặc biệt phản ứng bằng cách coi đó là "sửa xung đột
 đánh số** thay vì hoà giải — một bản trùng mới mỗi lần chạy, mãi mãi, dù file chưa từng thực sự
 đổi.
 
-**Vì vậy: mặc định tool TỪ CHỐI chạy** (preflight fail trước khi đụng byte nào) nếu `--path` rơi
-vào một thư mục như vậy — nhận diện qua biến môi trường client tự đặt (`OneDrive`,
+**Vì vậy: mặc định tool CHỈ CẢNH BÁO** (log `CẢNH BÁO: ...` rồi chạy tiếp) nếu `--path` rơi vào
+một thư mục như vậy — nhận diện qua biến môi trường client tự đặt (`OneDrive`,
 `OneDriveConsumer`, `OneDriveCommercial` trên Windows) hoặc qua tên đường dẫn
-(`~/Library/CloudStorage/...` trên macOS, `Dropbox`, `iCloud Drive`…). Xem
-`internal/cloudsync/cloudsync.go`.
+(`~/Library/CloudStorage/...` trên macOS, `Dropbox`, `iCloud Drive`…). Thêm
+`--forbid-cloud-sync-path` để quay lại chế độ chặn (preflight fail trước khi đụng byte nào).
+Xem `internal/cloudsync/cloudsync.go`.
 
 ### ✅ Cách được khuyến nghị — `--push-to` (một lệnh, backup vào OneDrive vẫn NHANH)
 
@@ -158,9 +159,8 @@ robocopy "D:\GDrive-Mirror" "C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITE
 `--push-to` ở trên chính là bước này, tự động hoá — dùng nó thay vì lệnh `robocopy` tay, trừ khi
 đang debug/cần kiểm soát chi tiết.
 
-**Nếu bạn CHẮC CHẮN muốn `--path` CHÍNH LÀ thư mục cloud-sync (bỏ qua cả `--push-to`) bất chấp rủi
-ro ở trên** (vd đã tắt hẳn tính năng đồng bộ của client đó cho thư mục này), thêm
-`--allow-cloud-sync-path`.
+Mirror thẳng vào thư mục cloud-sync giờ là hành vi mặc định (kèm cảnh báo) — không cần cờ gì thêm.
+`--allow-cloud-sync-path` vẫn được chấp nhận nhưng không còn tác dụng.
 
 ## Incremental sync (Drive Changes API) — `--incremental`
 

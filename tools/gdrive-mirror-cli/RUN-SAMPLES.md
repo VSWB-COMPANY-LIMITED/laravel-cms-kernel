@@ -566,7 +566,7 @@ Google Drive **thẳng vào gốc OneDrive đang đồng bộ**. Cùng file, cù
 lần chạy lại thêm MỘT bản trùng tên tăng dần trên SharePoint (`file.docx` → `file-2.docx` →
 `file-3.docx` → … → `file-21.docx`) — vì mỗi lần tool tải-lại-rồi-ghi-đè (dù nội dung giống hệt),
 OneDrive coi đó là sửa xung đột và tự đẻ bản mới thay vì hoà giải. Từ bản này, tool **từ chối
-chạy** với `--path` kiểu này (xem README "KHÔNG mirror thẳng vào thư mục cloud-sync sống").
+chạy** với `--path` kiểu này (xem README "Mirror thẳng vào thư mục cloud-sync sống").
 
 **Vẫn cần backup vào OneDrive nhanh nhất có thể? Dùng `--push-to` — MỘT lệnh, tự động, an toàn
 hơn hẳn mirror thẳng:**
