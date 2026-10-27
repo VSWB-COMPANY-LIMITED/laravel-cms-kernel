@@ -504,6 +504,11 @@ folder, ghi log, in tổng kết. Không phải nhớ flag.
 | `[9]` / `[C]` / `[L]` / `[R]` | Trạng thái folder / xem cấu hình đang dùng / 40 dòng cuối log mới nhất / mở thư mục report | — | — |
 | `[X]` | Đổi tên `completed-folders.txt` thành `.bak` (staging + OneDrive không bị đụng) | — | — |
 
+**Chọn `[2]` hay `[7]`?** Muốn sync lại dữ liệu → **`[2]`**: file đã khớp Drive được bỏ qua (so size/MD5, mtime với
+Google-native), chỉ tải phần mới hoặc đổi, rẻ và an toàn. `[7]` (`--force`) tải lại **cả file không đổi**: tốn băng thông, và file
+Google-native export ra byte khác nhau mỗi lần nên `robocopy` ghi đè OneDrive → OneDrive sinh bản xung đột `-DESKTOP-...` (§11.1).
+Chỉ dùng `[7]` khi nghi file local hỏng, và chọn đúng folder nghi ngờ thay vì cả 20. Ghi chú này cũng hiện ngay trong menu.
+
 Các mục `[1]`–`[3]`, `[5]`, `[7]`–`[8]` hỏi thêm **flag tuỳ ý** (vd `--incremental`, `--ignore-shrink`,
 `--list-concurrency=16`, `--forbid-cloud-sync-path`) — Enter để bỏ qua. Chạy không cần menu (Task
 Scheduler): `run-mirror.bat 1` hoặc `run-mirror.bat 2` (exit code `0` sạch / `1` có lỗi / `2` thiếu file).

@@ -221,6 +221,7 @@ function Invoke-Choice([string]$Choice, $Folders) {
     }
     "2" {  # chay lai tat ca, bo qua resume
       Say "Chay lai TAT CA $($Folders.Count) folder (bo qua resume). Re nho delta-sync: chi tai file moi/doi." Cyan
+      Say "(File da khop voi Drive duoc bo qua, khong tai lai. Muon ep tai lai file hong: dung [7].)" DarkGray
       Invoke-Batch $Folders (Read-Extra) $true $true
     }
     "3" {  # chon folder cu the
@@ -259,7 +260,7 @@ function Invoke-Choice([string]$Choice, $Folders) {
     "7" {  # force
       Say "CANH BAO --force: tai lai TOAN BO file cua folder da chon (khong xoa gi)." Yellow
       Say "Ton bang thong va co the sinh ban xung dot '-DESKTOP-...' tren OneDrive voi file Google-native." Yellow
-      Say "Chi dung khi nghi file local hong." Yellow
+      Say "Chi dung khi nghi file local hong. Chi muon sync lai du lieu moi: THOAT, dung [2] (re hon nhieu, khong rui ro)." Yellow
       $sel = @(Select-Folders $Folders)
       if ($sel.Count -eq 0) { return }
       if (Confirm-Yes "  Xac nhan --force cho $($sel.Count) folder?") { Invoke-Batch $sel @("--force") $true $true }
@@ -319,6 +320,7 @@ function Show-Menu($Folders) {
   Say " CHAY DONG BO (tai + push OneDrive)"
   Say "  [1] Chay tiep           chi folder CHUA xong (resume)"
   Say "  [2] Chay lai TAT CA     bo qua resume, re nho delta-sync"
+  Say "        -> DUNG KHI: muon sync lai du lieu. File khong doi tren Drive se tu bo qua." DarkGray
   Say "  [3] Chon folder         chay rieng vai folder"
   Say " THU / KIEM TRA (khong push OneDrive)"
   Say "  [4] Dry-run             liet ke thu, khong tai gi"
@@ -327,6 +329,8 @@ function Show-Menu($Folders) {
   Say " XU LY SU CO"
   Say "  [6] Chay lai item LOI   --retry-failed tu report lan truoc"
   Say "  [7] Tai lai toan bo     --force (can xac nhan)"
+  Say "        -> CHI KHI nghi file local HONG. Tai lai ca file khong doi, ton bang thong," DarkGray
+  Say "           co the sinh ban xung dot -DESKTOP-... tren OneDrive. Muon sync lai thi dung [2]." DarkGray
   Say " THONG TIN"
   Say "  [9] Trang thai folder   [C] Xem cau hinh   [L] Xem log moi nhat   [R] Mo thu muc report"
   Say "  [X] Xoa trang thai resume (doi ten thanh .bak)"
