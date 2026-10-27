@@ -3,6 +3,8 @@ package mirror
 import (
 	"strings"
 	"testing"
+
+	"github.com/vswb/gdrive-mirror/internal/localpath"
 )
 
 // resolvedNames is a small test helper: id -> final local name, for
@@ -467,5 +469,62 @@ func TestAssembleItems_UnknownKeyDoesNotPanic(t *testing.T) {
 	items := s.assembleItems(root, results)
 	if len(items) != 1 || items[0].Path != "sub1" {
 		t.Fatalf("expected exactly the dir entry with no children, got %+v", items)
+	}
+}
+
+// TestResolveSiblingNames_UnicodeNormalizationCollision reproduces the OneDrive
+// conflict loop of 2026-10-27: two DISTINCT Drive items whose names are the same
+// text in NFC vs NFD (e.g. one typed on Windows, one uploaded from macOS). NTFS
+// keeps them as two files but OneDrive/SharePoint treats them as ONE name. They
+// must resolve to DIFFERENT local names (so OneDrive never sees one name written by
+// two sources) AND be flagged as a real Drive-side duplicate.
+//
+// Only the COLLISION KEY is normalised, never the name itself: an item with no
+// partner keeps exactly the name Drive gave it. (An earlier attempt normalised every
+// local name to NFC; on a real mirror that renamed 200+ existing files, which
+// robocopy then pushed as brand-new files next to their old NFD copies.)
+func TestResolveSiblingNames_UnicodeNormalizationCollision(t *testing.T) {
+	nfc := "Thaco tối ưu điểm pagespeed.xlsx"
+	nfd := "Thaco tối ưu điểm pagespeed.xlsx"
+	children := []rawChild{
+		{id: "idBBBBBBBBBBBBBBBBBBBB", name: nfd},
+		{id: "idAAAAAAAAAAAAAAAAAAAA", name: nfc},
+	}
+	resolved := resolveSiblingNames(children)
+
+	if localpath.CollisionKey(resolved[0].localName) == localpath.CollisionKey(resolved[1].localName) {
+		t.Fatalf("NFC/NFD variants still share one local name: %+q / %+q", resolved[0].localName, resolved[1].localName)
+	}
+	collided := 0
+	for _, r := range resolved {
+		if r.collided {
+			collided++
+			if r.duplicateOfID == "" {
+				t.Fatalf("NFC/NFD pair must be reported as a real duplicate, got none for %q", r.id)
+			}
+		}
+	}
+	if collided != 1 {
+		t.Fatalf("expected exactly 1 collided entry, got %d", collided)
+	}
+	// Order independence: same result whichever order Drive lists them in.
+	a := resolvedNames(resolveSiblingNames([]rawChild{children[0], children[1]}))
+	b := resolvedNames(resolveSiblingNames([]rawChild{children[1], children[0]}))
+	for id, n := range a {
+		if b[id] != n {
+			t.Fatalf("result depends on listing order for %s: %q vs %q", id, n, b[id])
+		}
+	}
+}
+
+// A lone NFD name (no NFC partner) must be left exactly as Drive named it.
+func TestResolveSiblingNames_LoneNFDNameIsNotRewritten(t *testing.T) {
+	nfd := "Thaco tối ưu.xlsx"
+	resolved := resolveSiblingNames([]rawChild{{id: "idAAAAAAAAAAAAAAAAAAAA", name: nfd}})
+	if resolved[0].localName != nfd {
+		t.Fatalf("lone NFD name was rewritten: got %+q want %+q", resolved[0].localName, nfd)
+	}
+	if resolved[0].collided {
+		t.Fatal("lone name must not be reported as collided")
 	}
 }

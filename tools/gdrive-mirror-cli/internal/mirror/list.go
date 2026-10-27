@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/text/unicode/norm"
 	"google.golang.org/api/drive/v3"
 
 	"github.com/vswb/gdrive-mirror/internal/localpath"
@@ -352,7 +353,11 @@ func (s *Syncer) collectRawChildren(ctx context.Context, folderID string, label 
 // The dedup key is lower-cased because the destination filesystem may be
 // NTFS/APFS, both case-insensitive by default: two Drive names differing
 // only by case are DIFFERENT files to Drive but the SAME file on disk there
-// — silently overwriting one with the other otherwise (fixes C1).
+// — silently overwriting one with the other otherwise (fixes C1). It is ALSO
+// folded to Unicode NFC (localpath.CollisionKey): a name stored on Drive as NFC
+// and another as NFD are two files to NTFS but ONE name to OneDrive/SharePoint,
+// which minted a "-<machine>-N" conflict copy on every --push-to (2026-10-27).
+// Only the KEY is folded — local names themselves are never rewritten.
 func resolveSiblingNames(children []rawChild) []resolvedChild {
 	sorted := make([]rawChild, len(children))
 	copy(sorted, children)
@@ -386,7 +391,7 @@ func resolveSiblingNames(children []rawChild) []resolvedChild {
 			name = localpath.TruncateComponent(name, 0)
 		}
 
-		origKey := strings.ToLower(name)
+		origKey := localpath.CollisionKey(name)
 		collided := used[origKey]
 		var duplicateOfID string
 		if collided {
@@ -397,7 +402,7 @@ func resolveSiblingNames(children []rawChild) []resolvedChild {
 		} else {
 			firstByKey[origKey] = c
 		}
-		used[strings.ToLower(name)] = true
+		used[localpath.CollisionKey(name)] = true
 
 		resolved = append(resolved, resolvedChild{rawChild: c, localName: name, collided: collided, duplicateOfID: duplicateOfID})
 	}
@@ -428,14 +433,18 @@ func resolveSiblingNames(children []rawChild) []resolvedChild {
 // equal logicalName always implies an equal collision key, but not the
 // reverse; comparing logicalName (not the post-sanitize name) is what keeps
 // the artifact case correctly excluded.
+//
+// Compared in Unicode NFC (the same fold localpath.CollisionKey applies to the
+// dedup key): the same text in NFC and NFD is ONE conceptual name — exactly the pair that fought over a single OneDrive name — so it must
+// count as a real duplicate, not as a sanitize artifact.
 func logicalName(c rawChild) string {
 	if c.isFolder {
-		return c.name
+		return norm.NFC.String(c.name)
 	}
 	if spec, ok := ExportMap[c.mimeType]; ok {
-		return c.name + "." + spec.Ext
+		return norm.NFC.String(c.name) + "." + spec.Ext
 	}
-	return c.name
+	return norm.NFC.String(c.name)
 }
 
 // disambiguate appends (progressively more of) the colliding item's Drive
@@ -457,7 +466,7 @@ func disambiguate(name string, id string, used map[string]bool, isDir bool) stri
 	}
 	for n := start; n <= len(id); n += 4 {
 		candidate := withIDSuffix(name, id, n, isDir)
-		if !used[strings.ToLower(candidate)] {
+		if !used[localpath.CollisionKey(candidate)] {
 			return candidate
 		}
 	}
@@ -466,7 +475,7 @@ func disambiguate(name string, id string, used map[string]bool, isDir bool) stri
 		// appending it to the end produced "bao cao_ID.pdf-2", i.e. a file that
 		// lost its .pdf extension entirely and no longer opens by association.
 		candidate := withSuffixBeforeExt(name, "_"+id+fmt.Sprintf("-%d", i), isDir)
-		if !used[strings.ToLower(candidate)] {
+		if !used[localpath.CollisionKey(candidate)] {
 			return candidate
 		}
 	}

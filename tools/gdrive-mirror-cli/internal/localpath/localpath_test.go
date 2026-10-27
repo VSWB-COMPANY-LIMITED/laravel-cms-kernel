@@ -264,3 +264,30 @@ func TestTruncateComponent_CapHoldsUnderExtremeReserve(t *testing.T) {
 		}
 	}
 }
+
+// CollisionKey folds case AND Unicode normalisation (NFC/NFD), but must never be
+// confused with SanitizeComponent: it is only a comparison key.
+func TestCollisionKey_FoldsCaseAndNormalization(t *testing.T) {
+	nfc := "Thaco tối ưu điểm.xlsx"
+	nfd := "Thaco tối ưu điểm.xlsx"
+	if nfc == nfd {
+		t.Fatal("test setup: NFC and NFD inputs must differ byte-wise")
+	}
+	if CollisionKey(nfc) != CollisionKey(nfd) {
+		t.Fatalf("NFC and NFD forms must share a key: %+q vs %+q", CollisionKey(nfc), CollisionKey(nfd))
+	}
+	if CollisionKey("Report.PDF") != CollisionKey("report.pdf") {
+		t.Fatal("case-only variants must share a key")
+	}
+	if CollisionKey("a.pdf") == CollisionKey("b.pdf") {
+		t.Fatal("different names must not share a key")
+	}
+}
+
+// SanitizeComponent must NOT rewrite Unicode form: a lone NFD name stays NFD.
+func TestSanitizeComponent_LeavesUnicodeFormAlone(t *testing.T) {
+	nfd := "tối.xlsx"
+	if got := SanitizeComponent(nfd); got != nfd {
+		t.Fatalf("SanitizeComponent rewrote an NFD name: got %+q want %+q", got, nfd)
+	}
+}

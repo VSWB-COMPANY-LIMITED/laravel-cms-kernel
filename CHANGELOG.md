@@ -100,6 +100,20 @@
   - Test cũ `AppsGsheetWriteTest` và `AppsGsheetAppendSucceededTest` gọi các hàm đã bị `77edbeb` gỡ
     (`apps_gsheet_order_row`, `apps_gsheet_append_succeeded`, …) ⇒ "undefined function" từ trước, KHÔNG do thay đổi này;
     dọn riêng. Test mới dùng `#[DataProvider]` (PHPUnit ≥ 10).
+- **[gdrive-mirror-cli] Tên local chuẩn hoá Unicode NFC — hết vòng lặp bản xung đột trên OneDrive do hai
+  item Drive trùng tên chỉ khác NFC/NFD (2026-10-27).** Phát hiện khi rà log: mỗi lần `--push-to`, robocopy
+  copy lại đúng 3 file (`New File`) và OneDrive sinh thêm 3 bản `-<máy>-N` (183→196 bản xung đột, 41/37/37
+  bản trên 3 file). Gốc rễ ĐÃ ĐO trên đĩa: staging có 2 file hiển thị cùng tên, khác kích thước, một tên NFC
+  (37 ký tự) một NFD (42 ký tự) — hai item Drive khác nhau (gõ trên Windows vs upload từ macOS). NTFS tách
+  được, OneDrive coi là một tên. Khoá trùng cũ chỉ `ToLower` nên không thấy. Sửa: khoá so trùng mới
+  `localpath.CollisionKey` (lower-case + NFC) và `logicalName()` so theo NFC ⇒ hai bản va chạm, bản sau nhận
+  `_<id>` và được báo trong `name-duplicates/`. CHỈ khoá được chuẩn hoá, tên file giữ nguyên như Drive —
+  bản đầu của fix này chuẩn hoá mọi tên về NFC và làm hỏng: rename-tracking dời 212 item, robocopy đẩy ~480
+  file "mới" lên OneDrive cạnh bản NFD cũ (xung đột 196→242). `golang.org/x/text` từ indirect thành
+  dependency trực tiếp. Các bản `-N` đã sinh KHÔNG tự mất (tool không xoá). Test:
+  `TestCollisionKey_FoldsCaseAndNormalization`, `TestResolveSiblingNames_UnicodeNormalizationCollision`,
+  `TestResolveSiblingNames_LoneNFDNameIsNotRewritten` (test đầu fail trước khi sửa). Kèm: `run-mirror.ps1` hết báo đỏ `NativeCommandError` và chữ Việt trong log hết vỡ
+  (exe ghi log ra stderr bằng UTF-8).
 - **[gdrive-mirror-cli] `name-duplicates` nay bắt đúng case "Google-native trùng tên file thật"
   (Sheet/Doc/Slide không đuôi mở rộng, export ra trùng tên 1 file thường cùng thư mục).** Phát hiện
   thật 2026-10-26: Drive có cả 1 Google Sheet tên `Dịch Vụ Hosting - Domains` (native, Drive không

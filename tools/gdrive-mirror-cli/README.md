@@ -420,11 +420,12 @@ pause
 - **Downloads are atomic**: written to a fixed-length hidden temp file next to the target (`.` + 8 hex of `sha256(targetPath)` + `-<runID>` + `.tmp`), renamed into place only on full success — a crash mid-transfer never leaves a truncated file. Temp name length never depends on the target's name length.
 - **Local names are sanitized on EVERY OS** (a mirror built on macOS/Linux must stay openable on Windows) — `internal/localpath.SanitizeComponent`:
   - Characters NTFS refuses (`< > : " | ? * \ /`) and control chars → `_`.
+  - Unicode form is **left as Drive gave it** (NFC/NFD are NOT rewritten) — rewriting every name renamed 200+ existing files and pushed them to OneDrive as new files next to their old copies. The NFC/NFD problem is handled in the collision pass below instead.
   - Leading/trailing spaces and trailing dots are trimmed (SharePoint/OneDrive reject leading spaces; Windows drops trailing ones).
   - A name empty after the above (including bare `.`/`..`) → `_`.
   - Windows-reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) get `_` appended (`CON.txt` → `CON_.txt`).
   - Capped at **255 UTF-8 bytes** per component (`TruncateComponent`), cutting only on a rune boundary and appending a 6-hex hash of the original name when a real cut happens, so two different long names never collapse onto one.
-- **Name collisions resolved at LISTING time**, one shared namespace across files AND folders in the same parent. Decision order is by **Drive file ID ascending** — never `files.list` response order (not stable) — so the same Drive items always produce the same local names. The loser gets the first 8 chars of its file ID before the extension (`report.pdf` → `report_1JP7CIBW.pdf`); the dedup key is lower-cased (NTFS/APFS case-insensitive). Every collision increments `Stats.Collisions` and logs a warning with old/new name and file ID.
+- **Name collisions resolved at LISTING time**, one shared namespace across files AND folders in the same parent. Decision order is by **Drive file ID ascending** — never `files.list` response order (not stable) — so the same Drive items always produce the same local names. The loser gets the first 8 chars of its file ID before the extension (`report.pdf` → `report_1JP7CIBW.pdf`); the dedup key (`localpath.CollisionKey`) is lower-cased (NTFS/APFS case-insensitive) **and folded to Unicode NFC**: Drive keeps names byte-for-byte, so the same Vietnamese text can exist as two items — one NFC (typed on Windows), one NFD (uploaded from macOS). NTFS stores them as two files but OneDrive/SharePoint treats them as ONE name, so each `--push-to` wrote that name from two sources and OneDrive minted a `-<machine>-N` conflict copy every run (real incident 2026-10-27, 183+ copies). Keyed in NFC the pair collides, one gets a `_<id>` suffix and `name-duplicates/` reports it; a name with no partner is never touched. Every collision increments `Stats.Collisions` and logs a warning with old/new name and file ID.
 - **Every resolved local path is re-validated against `--path`** (`internal/localpath.SafeJoin`) right before any directory/file is created — defense-in-depth against a Drive name containing `/` or `..`. A rejection is a permanent failure (goes to the failed-items report) and never counts toward the circuit breaker.
 - **Listing "verify on zero"**: a folder reported empty is re-checked once after 1s — `files.list` has been observed to return an empty page for a folder that has children under API load.
 - **Listing shrink-guard**: after a normal (non-`--dry-run`) listing, the folder's item count is compared with the previous run's (`<path>/../gdrive-mirror-reports/state/<folderTag>.json`: `folder_id`/`item_count`/`listed_at`/`run_id`, same fields as the PHP source so either implementation can read the other's). If the count dropped below **80%**, the run **aborts that folder** (no download, state untouched) — far more likely "Drive API hiccup / access revoked" than a real 20%+ deletion. `--ignore-shrink` when the drop is real. No prior/corrupt state never aborts. Skipped in `--dry-run`. Ports `shouldAbortOnShrink()`/`readListingState()`/`writeListingState()`.
@@ -436,7 +437,8 @@ pause
 Name sanitizing changes what some files are *called* on disk. Because this tool **never deletes local
 files**, the first run after upgrading leaves the old copy and downloads the new name alongside it — a
 duplicate, not a loss. Only files whose Drive name contained something unsafe are affected (forbidden
-chars, leading/trailing dots/spaces, reserved device name, over 255 bytes, case-only clash). A mirror
+chars, leading/trailing dots/spaces, reserved device name, over 255 bytes, case-only clash, or an NFC/NFD
+twin pair). A mirror
 of ordinary names re-runs as a normal no-op delta sync. Recommended: run once, diff against the
 previous run (or check `Collisions` in the summary), delete stale originals by hand.
 
@@ -644,7 +646,8 @@ Get-ChildItem C:\gdrive-mirror-reports\name-duplicates\
 
 **Tình huống điều tra 2026-10-26:** `Dịch Vụ Hosting - Domains.xlsx` trong `Accounting/Sổ Thu Chi`,
 xoá trên OneDrive 3 lần vẫn quay lại. Nghi ngờ (1) lỗi Unicode NFC/NFD, (2) OneDrive tự phục hồi do
-race condition, (3) thiết bị khác đồng bộ cùng thư viện — **cả 3 SAI**. Nguyên nhân thật (xác nhận
+race condition, (3) thiết bị khác đồng bộ cùng thư viện — **cả 3 SAI cho file này** (NFC/NFD thì đúng cho
+một trường hợp KHÁC, xem cuối mục). Nguyên nhân thật (xác nhận
 bằng cách mở trực tiếp Google Drive): folder có **CẢ một Google Sheet native tên `Dịch Vụ Hosting -
 Domains` (không đuôi) LẪN một file Excel thật `Dịch Vụ Hosting - Domains.xlsx`** — export Sheet tự
 thêm `.xlsx`, trùng tên y hệt. Đây là **2 Drive item khác nhau, cùng tồn tại VĨNH VIỄN** — mirror nào
@@ -653,6 +656,20 @@ cũng tải cả hai, collision, push lại. Xoá trên OneDrive chỉ xoá TRI�
 **Đã fix trong code:** `internal/mirror/list.go::logicalName()` — report `name-duplicates/` bắt đúng
 cả 2 dạng (tên gốc y hệt; Google-native trùng tên file thường sau khi thêm đuôi export). Vẫn LOẠI TRỪ
 trùng do sanitize ký tự.
+
+**Trường hợp thứ hai, 2026-10-27 — trùng do Unicode NFC/NFD (có thật):** OneDrive có 183+ bản
+`<tên>-EugeneLe’s MacBook Pro-N`, tăng đúng +3 sau MỖI lần push, và robocopy copy lại đúng 3 file đó ở
+mọi folder (`New File`, cột `Extras` tăng 3 mỗi lần). Staging có 2 file hiển thị cùng tên nhưng khác
+kích thước: một tên NFC (37 ký tự), một NFD (42 ký tự) — hai item Drive khác nhau. NTFS tách được, OneDrive
+coi là một tên nên xung đột lặp mãi. Cách nhận biết trên đĩa: `$name.IsNormalized([Text.NormalizationForm]::FormC)`.
+**Đã fix trong code:** khoá so trùng (`localpath.CollisionKey`) và `logicalName()` gập về NFC — CHỈ khoá, không
+đổi tên file (test: `TestCollisionKey_FoldsCaseAndNormalization`,
+`TestResolveSiblingNames_UnicodeNormalizationCollision`, `TestResolveSiblingNames_LoneNFDNameIsNotRewritten`).
+Mỗi cặp thành 1 file tên thường + 1 file `_<id>`; tên không có cặp giữ nguyên.
+**Bài học (2026-10-27):** bản đầu chuẩn hoá MỌI tên về NFC → rename-tracking dời 212 item trong staging, robocopy
+đẩy ~480 file "mới" lên OneDrive cạnh bản tên NFD cũ (`Extras` 201→410, xung đột 196→242). Đã bỏ cách đó. **Các bản `-N` đã sinh ra từ trước KHÔNG tự
+mất** (tool không xoá) — danh sách nằm ở `C:\gdrive-mirror-reports\onedrive-conflict-copies-<ngày>.csv`,
+soát rồi xoá tay qua web SharePoint/OneDrive. Nên đồng thời xoá/đổi tên một trong hai item trùng trên Drive.
 
 **Quy trình xử lý 1 cặp từ report:**
 1. Mở `C:\gdrive-mirror-reports\name-duplicates\<folderTag>.md`, lấy 2 link Drive của cặp.

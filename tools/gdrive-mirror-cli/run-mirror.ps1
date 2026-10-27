@@ -173,11 +173,18 @@ function Read-Extra {
 # gdrive-mirror.exe ghi log ra STDERR. Voi `*>&1`, PowerShell 5.1 boc moi dong stderr thanh
 # ErrorRecord va in do chot "NativeCommandError" (nhin nhu loi du chay van dung). Nen chi gop
 # stderr (2>&1) roi doi ErrorRecord thanh chu thuong truoc khi hien/ghi log.
+# Exe in UTF-8: dat Console.OutputEncoding = UTF-8 trong luc chay, neu khong PowerShell giai ma
+# theo codepage OEM va chu Viet trong man hinh/log bi vo ("Ky thuat" -> "Kß╗╣ thuß║¡t"). Chi anh
+# huong chu hien thi; ten file tren dia do chinh exe ghi nen khong bi anh huong.
 function Invoke-Mirror([string[]]$ArgList) {
+  $prevEnc = $null
+  try { $prevEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
   & $Exe @ArgList 2>&1 | ForEach-Object {
     if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
   } | Tee-Object -FilePath $Log -Append | Out-Host
-  return $LASTEXITCODE
+  $code = $LASTEXITCODE
+  if ($prevEnc) { try { [Console]::OutputEncoding = $prevEnc } catch { } }
+  return $code
 }
 
 # Chay gdrive-mirror cho danh sach folder. $Push = them --push-to; $MarkDone = ghi vao state resume.

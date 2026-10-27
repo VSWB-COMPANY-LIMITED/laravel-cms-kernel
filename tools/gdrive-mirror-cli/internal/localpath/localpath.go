@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // forbiddenChars are the characters NTFS refuses in a path component. Drive
@@ -205,4 +207,20 @@ func SafeJoin(root, relPath string) (string, error) {
 		return "", fmt.Errorf("localpath.SafeJoin: path escapes root (root=%q relPath=%q resolved=%q)", root, relPath, joined)
 	}
 	return joined, nil
+}
+
+// CollisionKey is the key two sibling names are compared on to decide whether they
+// would land on the SAME file once written to the destination. It is used ONLY for
+// that comparison — the name itself is never rewritten with it.
+//
+// Two folds, both because the destination may not tell the names apart:
+//   - lower-case: NTFS/APFS are case-insensitive by default.
+//   - Unicode NFC: Drive keeps names byte-for-byte, so the same Vietnamese text can
+//     exist as two items, one NFC (typed on Windows), one NFD (uploaded from macOS).
+//     NTFS stores them as two files but OneDrive/SharePoint treats them as ONE name,
+//     so every --push-to wrote that name from two sources and OneDrive minted a
+//     "-<machine>-N" conflict copy each run (real incident 2026-10-27, 183+ copies).
+//     Keyed in NFC they collide in the sibling pass, and one gets a "_<id>" suffix.
+func CollisionKey(name string) string {
+	return strings.ToLower(norm.NFC.String(name))
 }
