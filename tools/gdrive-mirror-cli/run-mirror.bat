@@ -5,8 +5,8 @@ REM                    bang 1 cu double-click (khong can mo PowerShell)
 REM ============================================================================
 REM
 REM  FILE NAY LAM GI
-REM    Chi la "vo boc" goi script PowerShell run-mirror.ps1 (nam CUNG THU MUC voi
-REM    file .bat nay), roi hien ket qua OK / CANH BAO va giu cua so de doc.
+REM    Chi la "vo boc" goi script PowerShell run-mirror.ps1 (tim canh file .bat nay,
+REM    khong co thi dung C:\Tools\gdrive\run-mirror.ps1), roi hien ket qua OK / CANH BAO va giu cua so de doc.
 REM    Toan bo logic dong bo (danh sach folder ID, --push-to, resume...) nam trong
 REM    run-mirror.ps1, KHONG nam o day.
 REM
@@ -66,19 +66,31 @@ echo ===== gdrive-mirror: Drive -^> C:\GDrive-Mirror -^> OneDrive =====
 echo Bat dau: %date% %time%
 echo.
 
+REM Tim run-mirror.ps1, theo thu tu uu tien:
+REM   1) bien moi truong GDRIVE_PS1 neu da dat  2) file canh .bat nay
+REM   3) C:\Tools\gdrive\run-mirror.ps1 -- thu muc trien khai mac dinh.
+REM Muc 3 can thiet vi .ps1 chua folder ID that nen KHONG nam trong repo: chay ban .bat
+REM trong repo van tu tro sang ban o may van hanh.
+set "PS1=%GDRIVE_PS1%"
+if not defined PS1 set "PS1=%~dp0run-mirror.ps1"
+if not exist "%PS1%" set "PS1=C:\Tools\gdrive\run-mirror.ps1"
+
 REM Kiem tra som: thieu run-mirror.ps1 thi bao ro thay vi de PowerShell tu nem loi kho hieu.
-if not exist "%~dp0run-mirror.ps1" (
-  echo [LOI] Khong tim thay run-mirror.ps1 canh file .bat nay: %~dp0
+REM Luu y: khong dung dau ngoac trong echo ben trong khoi if, cmd se hieu nham.
+if not exist "%PS1%" (
+  echo [LOI] Khong tim thay run-mirror.ps1 - da thu: canh file .bat, roi C:\Tools\gdrive\
   echo       Xem README muc 11.2 de dung lai script tren may nay.
   set CODE=2
   goto :done
 )
+echo Dung script: %PS1%
+echo.
 
 REM -NoProfile        : khong nap profile PowerShell cua user (nhanh hon, ket qua on dinh)
 REM -ExecutionPolicy Bypass : chi cho TIEN TRINH NAY, de khong bi chan script chua ky;
 REM                     KHONG doi policy he thong.
 REM -File             : chay file .ps1; exit code cua script tro thanh ERRORLEVEL o duoi.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-mirror.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PS1%"
 set CODE=%ERRORLEVEL%
 
 :done
