@@ -983,6 +983,7 @@ if (!function_exists('apps_google_sheet')) {
             }
 
             // 🔴 [27/10/2026] NEO TÌM BẢNG VÀO CỘT A — chữa lỗi "cột nhảy" (khách Thaco).
+            // Lịch sử đầy đủ + các điều CẤM của khối ghi này: CHANGELOG.md, mục "Lỗi 'cột nhảy'" (27/10/2026).
             //
             // `append()` với range = tên tab để Google TỰ DÒ bảng rồi ghi từ cột đầu của bảng đó. Khi
             // có dòng trống hoàn toàn nằm giữa dữ liệu (khách xoá NỘI DUNG dòng thay vì xoá dòng) mà

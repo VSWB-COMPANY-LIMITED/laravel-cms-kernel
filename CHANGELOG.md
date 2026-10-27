@@ -3,19 +3,103 @@
 ## [Unreleased]
 
 ### Fixed
-- **[apps_google_sheet] Hết lỗi "cột nhảy": dòng lead không còn bị ghi lệch sang phải +8 cột mỗi lượt (khách
-  Thaco, 22–27/10/2026).** Gốc rễ ĐÃ ĐO: `append()` chỉ truyền tên tab nên Google tự dò "bảng". Khi sheet có
-  dòng TRỐNG HOÀN TOÀN nằm giữa dữ liệu (khách xoá nội dung dòng thay vì xoá dòng — ca thật: 14 dòng 3511–3580
-  bị xoá nội dung lúc 22/10 09:52, lead kế tiếp rơi vào cột I) mà các cột Địa chỉ/Showroom/Additional data
-  trống sẵn, Google coi khối bên phải (I..L) là bảng và ghi từ cột I; dòng sau bắt đầu ở khối cuối của dòng
-  trước ⇒ I, Q, Y, AG… vô tận (66 lead Thaco, tới cột CW). Tái hiện đủ trên sheet thử và qua chính
-  `apps_google_sheet()`: không dòng trống ⇒ A3605; 14 dòng trống ⇒ I3605, Q3606, Y3607. Sửa: chỉ định range
-  `'Tab'!A:A` (hàm `apps_gsheet_append_range()`) để Google chỉ dò bảng trong cột A ⇒ A3605, A3606, A3607 (kể
-  cả xoá cả dòng cuối, rác sẵn bên phải). KHÔNG đổi cách ghi: vẫn `append()` của gói, vẫn OVERWRITE, không tự
-  tính dòng cuối. Chỉ neo khi A1 có tiêu đề; bảng cố ý bắt đầu cột khác giữ cách cũ. Range của client dùng
-  chung được dọn trước và sau lượt ghi (`finally`). Thêm log lỗi `[GSheet] Dòng vừa ghi KHÔNG bắt đầu ở cột A`
-  (`apps_gsheet_range_starts_at_column_a()`) để lần sau phát hiện ngay thay vì im lặng. Test:
-  `tests/Unit/AppsGsheetAppendRangeTest.php`.
+- **[Google Sheets][🔴 khối ghi dữ liệu] Lỗi "cột nhảy": lead bị ghi lệch sang phải +8 cột mỗi lượt (khách Thaco, 22–27/10/2026) — gốc rễ đã ĐO, đã sửa bằng cách neo range `'Tab'!A:A`.**
+
+  **1. Triệu chứng.**
+  - Sheet khách "Thaco CV_Raw Lead", tab `Raw Lead` (header A→M: Date, Name, Phone, Phiên bản, Nhu cầu, Khu vực,
+    Địa chỉ, Showroom, Form Name, Form ID, Leadgen ID, Time, Additional data).
+  - Từ 22/10/2026 12:38 (giờ VN), mỗi lead mới bắt đầu ở một cột xa hơn dòng trước ĐÚNG 8 cột: dòng 3605 ở `I`,
+    3606 ở `Q`, 3607 ở `Y`, … dòng 3668 ở `CK:CW` (tab nở tới 101 cột). Thứ tự 13 ô TRONG từng dòng vẫn ĐÚNG; chỉ cột
+    bắt đầu sai. API vẫn trả 200, `error=false`, không có log lỗi — lỗi IM LẶNG, khách phát hiện bằng mắt.
+  - 66 lead bị ảnh hưởng (22/10 12:38 → 27/10 13:43). Người dùng đã sửa tay lại dữ liệu; code KHÔNG tự sửa/backfill.
+
+  **2. Gốc rễ (đã đo, không phải suy đoán).**
+  - Lời gọi ghi là `Sheets::…->sheetById()->append([$values])` của gói `revolution/laravel-google-sheets` với `range` =
+    TÊN TAB, `insertDataOption` = `OVERWRITE` (mặc định của gói), `valueInputOption` = `RAW`. Kernel không chỉ định cột:
+    Google `values.append` tự dò "bảng" trong cả tab rồi ghi từ CỘT ĐẦU của bảng nó dò ra.
+  - Điều kiện kích hoạt: tab có dòng TRỐNG HOÀN TOÀN nằm giữa dữ liệu (xoá NỘI DUNG dòng bằng phím Delete thay vì
+    "Delete row") VÀ các cột Địa chỉ/Showroom/Additional data (G, H, M) trống ở mọi lead. Khi đó Google coi khối bên phải
+    (I..L) là bảng và ghi từ cột I; dòng vừa ghi lại có G/H-tương-ứng trống nên khối cuối của nó bắt đầu ở cột +8, dòng
+    sau lại bắt đầu ở đó ⇒ tự lặp vô hạn.
+  - Bằng chứng: (a) DB `leads.options → pushers.leadgen_notification_spreadsheet.data.updates.updatedRange`: lead tới
+    22/10 07:39 (dòng 3604) đều `A…:M…`; lead 22/10 12:38 là `I3605:U3605`, rồi `Q3606`, `Y3607`, `AG3608`… (+8 mỗi lượt).
+    (b) Lịch sử phiên bản của sheet (Drive revisions, so từng ô): bản 22/10 00:39 UTC có 0 dòng trống; bản 02:52 UTC (một
+    người dùng của khách sửa tay) có 14 dòng trống hoàn toàn: 3511, 3516, 3520, 3530, 3531, 3556, 3558, 3565, 3567,
+    3569, 3572, 3574, 3576, 3580; không đổi gì khác (độ rộng cột, lọc, validation, merge như cũ). (c) Tái hiện trên sheet
+    thử dữ liệu giả cùng hình dạng — bảng ở mục 5.
+  - ĐÃ BÁC BỎ: giả thuyết "cache/LKG header + `array_replace` lệch thứ tự cột" (mục 3.2 của `tasks/audit-gsheet-nhay-cot.md`
+    lúc audit đầu). Thứ tự ô trong dòng luôn đúng, log 26/10 không có cảnh báo đọc header của Thaco. Khối sắp cột
+    `array_replace` không liên quan lỗi này.
+
+  **3. Thay đổi** (`helpers/helpers.php`, hàm `apps_google_sheet()` + hai hàm thuần mới).
+  - Trước `append()`: dọn range của client dùng chung (`->range('')`), lấy tên tab bằng `->ranges()`; nếu tên tab không
+    rỗng VÀ ô header đầu (`$headers[0]`, tức A1) không trống thì đặt `->range(apps_gsheet_append_range($tab))` =
+    `'Tab'!A:A` (tên tab bọc nháy đơn, nhân đôi nháy đơn bên trong). Sau lượt ghi: `finally { ->range('') }`.
+  - Mọi tham số khác KHÔNG đổi: vẫn `append([$values])` của gói, `RAW`, `OVERWRITE`; không tự tính dòng; không `values.update`.
+  - Giữ cách cũ (không neo) khi: `$headers` rỗng hoặc `$with_keys=false` (A1 trống ⇒ bảng có thể cố ý bắt đầu ở cột
+    khác), hoặc không phân giải được tên tab.
+  - Log lỗi mới `[GSheet] Dòng vừa ghi KHÔNG bắt đầu ở cột A — nghi lệch cột` (kèm `updated_range`), qua
+    `apps_gsheet_range_starts_at_column_a()`. CHỈ log: không đổi luồng, không chặn lead.
+  - Hợp đồng ngầm của `A:A`: Google dò bảng chỉ qua cột A ⇒ mọi dòng lead PHẢI có giá trị ở cột A (Date). Dòng có dữ liệu
+    nhưng ô A trống sẽ "vô hình" với lượt ghi sau và có thể bị GHI ĐÈ (vì OVERWRITE). Thaco: A luôn có (kiểm 27/10: duy nhất
+    dòng 2174 có dữ liệu mà A trống — ghi chú tay ở D–F từ trước, không phải lead). Sheet khách mới: kiểm điều này.
+
+  **4. Phần KHÔNG đổi và lịch sử liên quan.** Timeline theo git `helpers/helpers.php`:
+  - 30/6 `82f7561` OP#3550: `append(…,'INSERT_ROWS')` + verify `updatedRows` (chống mất dòng khi tab bị Filter/ẩn).
+  - 30/6 `fcccb52` OP#3551: chuyển sang `values.update A{count(cột A)+1}` ("miễn nhiễm Filter"); kèm `c19cbc1` OP#3552 (reset
+    range — vì `range('A:A')`/`range('A{n}')` RÒ sang lượt ghi sau do client dùng chung), `45a54b7` OP#3553 (auto-grow),
+    `3b89766` OP#3554 (retry/backoff), `780d76a` OP#3555.
+  - SỰ CỐ NGHIÊM TRỌNG của bản `values.update`: ghi dồn nhiều lead + Google đọc-sau-ghi trễ ⇒ mọi lead đọc `count(A:A)`
+    cũ ⇒ cùng ghi `A2` ⇒ ĐÈ lên nhau, mất lead im lặng cho mọi khách (sheet "Follow CRM - Teraco": 5/5 lead cùng
+    `A2:G2`). Phân tích: `dev/plugins/lead/docs/AUDIT-gsheet-2026-07-04.md`.
+  - 9/7 `b303f82` OP#3556: revert về `append(INSERT_ROWS)`. 21 phút sau `77edbeb` "revert to before 30/6" (message không ghi
+    lý do) kéo code về `->append([$values])` trần ⇒ **từ 9/7 đến nay `insertDataOption` = OVERWRITE (mặc định của gói);
+    INSERT_ROWS và verify `updatedRows` cũng đã mất.** Lý do gỡ `INSERT_ROWS` không được ghi trong
+    commit message.
+  - Chủ sản phẩm chốt 27/09/2026: giữ `append()` trần, chấp nhận lỗi Filter/ẩn, dặn khách không bật filter/ẩn dòng tab
+    đích (comment "ĐỪNG SỬA KHỐI GHI NÀY" trong code). Chủ sản phẩm 27/10: "append là đúng và đang dùng; `.update` mới là
+    thứ sinh lỗi". Bản sửa chỉ đổi PHẠM VI DÒ BẢNG, không đổi ai tính dòng cuối (vẫn là Google, phía server).
+
+  **5. Kiểm chứng (27/10/2026).** Sheet thử dữ liệu giả, 3.604 dòng, G/H/M trống, 14 dòng trống đúng số dòng thật của
+  Thaco, gọi đúng như kernel (`range` = tên tab, `OVERWRITE`) trừ cột "Range":
+
+  | Kịch bản | Range | 3 lượt ghi liên tiếp |
+  |---|---|---|
+  | không có dòng trống | tên tab | A3605, A3606, A3607 |
+  | 14 dòng trống (cách cũ) | tên tab | **I3605, Q3606, Y3607** (đúng như production) |
+  | 14 dòng trống | tên tab + `INSERT_ROWS` | I, Q, Y — đổi insertDataOption KHÔNG cứu |
+  | 14 dòng trống | `A:M` | I, I, I |
+  | 14 dòng trống | `A1` / `A1:M1` | ghi vào chính các dòng trống 3511, 3516, 3520 |
+  | 14 dòng trống | **`'Tab'!A:A`** | **A3605, A3606, A3607** |
+  | xoá cả 3 dòng cuối | tên tab / `A:A` | I3602, Q3603 / **A3602, A3603** |
+  | rác sẵn bên phải (3 dòng ở I…) | tên tab / `A:A` | AG3608, AO3609 / **A3605, A3606** (ghi chồng lên dòng rác) |
+  | dòng ẩn 3600–3604 | tên tab / `A:A` | I3600 hai lần / A3600 hai lần — GHI ĐÈ dòng ẩn, như cũ, KHÔNG đổi |
+  | G/H có dữ liệu | tên tab / `A:A` | đều A |
+
+  - Qua chính `apps_google_sheet()` trên sheet thử: trước sửa I, Q, Y; sau sửa A, A, A (3 lượt trong CÙNG tiến trình ⇒
+    chứng minh range đã được dọn, không rò).
+  - TRÊN SHEET THẬT của khách (cùng id lỗi), khi sheet còn 12 dòng trống giữa bảng: lead thật 15:44:50 do hệ thống tự ghi →
+    `A3669:M3669` (DB + đọc lại ô); 2 dòng test `ZZ-TEST-XOA-1/2` bắn qua `apps_google_sheet()` → `A3670`, `A3671`
+    (đọc lại bằng API: đúng 13 cột A–M).
+  - Test đơn vị: `tests/Unit/AppsGsheetAppendRangeTest.php` (12 ca: bọc nháy, nháy đơn trong tên, tên tab giống ô như
+    `E1`, và `AG…`/`AW…` KHÔNG bị nhận nhầm là cột A).
+
+  **6. Nếu tái diễn — cách phát hiện.**
+  - Log kênh đang ghi sheet, dòng `[GSheet] Dòng vừa ghi KHÔNG bắt đầu ở cột A — nghi lệch cột`.
+  - Chỉ-đọc DB: `SELECT created_at, JSON_UNQUOTE(JSON_EXTRACT(options,'$.pushers.leadgen_notification_spreadsheet.data.updates.updatedRange')) rng FROM leads WHERE hub_id='<hub>' AND created_at >= '<ngày>' ORDER BY created_at;`
+    — cột bắt đầu ≠ `A` là lệch. Đọc thêm lịch sử phiên bản của sheet để tìm người/lúc sửa tay.
+
+  **7. Chưa biết / giới hạn.**
+  - Cách Google dò bảng không có tài liệu chính thức; kết luận dựa trên thực nghiệm 27/10 (mỗi kịch bản chạy một lần, sheet
+    thử 26 cột) và có thể đổi theo thời gian — log ở mục 6 là lưới bắt.
+  - Ghi dồn đồng thời (stress 27/10: 8 tiến trình × 3 lượt cùng lúc, dữ liệu giả, MỘT lần chạy): cách cũ (range = tên tab,
+    OVERWRITE) Google báo 24 lượt thành công nhưng chỉ 9 `updatedRange` khác nhau (7 lượt cùng `A3605`) ⇒ ghi đè nhau;
+    `A:A` + OVERWRITE: 22 thành công, còn 17 dòng; `A:A` + `INSERT_ROWS`: 24/24. Đây là STRESS vượt xa tần suất thật,
+    KHÔNG phải bằng chứng khách mất lead (chưa khách nào báo). Chưa đo `INSERT_ROWS` với dòng ẩn/Filter. Chưa đổi gì ở
+    phần này.
+  - Test cũ `AppsGsheetWriteTest` và `AppsGsheetAppendSucceededTest` gọi các hàm đã bị `77edbeb` gỡ
+    (`apps_gsheet_order_row`, `apps_gsheet_append_succeeded`, …) ⇒ "undefined function" từ trước, KHÔNG do thay đổi này;
+    dọn riêng. Test mới dùng `#[DataProvider]` (PHPUnit ≥ 10).
 - **[gdrive-mirror-cli] `name-duplicates` nay bắt đúng case "Google-native trùng tên file thật"
   (Sheet/Doc/Slide không đuôi mở rộng, export ra trùng tên 1 file thường cùng thư mục).** Phát hiện
   thật 2026-10-26: Drive có cả 1 Google Sheet tên `Dịch Vụ Hosting - Domains` (native, Drive không
