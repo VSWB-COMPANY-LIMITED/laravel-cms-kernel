@@ -345,7 +345,7 @@ func TestResolveSiblingNames_SanitizeArtifactCollision_DoesNotSetDuplicateOfID(t
 
 // TestAssembleItems_PreservesDepthFirstOrder is the ordering-preservation
 // guarantee the whole concurrency refactor depends on: --limit's documented
-// contract ("first N items in depth-first order", see RUN-SAMPLES §0.5)
+// contract ("first N items in depth-first order", see README §5.2)
 // must not depend on goroutine scheduling. This builds a results map by
 // hand (as if every folder had already been fetched concurrently, in
 // arbitrary completion order) and checks assembleItems reconstructs the
