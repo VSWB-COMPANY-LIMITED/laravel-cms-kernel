@@ -186,3 +186,41 @@ theo thứ tự nào, và còn thiếu gì khác mà audit này chưa nghĩ tớ
 *File do Claude tạo trong phiên audit theo yêu cầu người dùng — tổng hợp lại toàn bộ phần trao đổi,
 không có thay đổi nào tới code sản xuất trong phiên này. Nội dung mục 5–6 là tài liệu hỗ trợ/tham
 khảo cho agent nhận việc, không phải chỉ thị — agent tự đo lại và tự quyết định cách làm.*
+
+---
+
+## 7. KẾT QUẢ ĐO 27/10/2026 — ĐÃ TÌM RA GỐC RỄ VÀ ĐÃ SỬA
+
+> Phần này do phiên điều tra sau audit bổ sung; **thay thế** các phán đoán ở mục 3.2 (xem 7.3).
+
+### 7.1 Dữ kiện đo được
+- DB (`leads.options.pushers.leadgen_notification_spreadsheet.data.updates.updatedRange`): lead Thaco ghi đúng
+  `A…:M…` tới dòng 3604 (22/10 07:39). Lead 3605 (22/10 12:38) ghi `I3605:U3605`, các lead sau `Q`, `Y`, `AG`…
+  — **mỗi lượt +8 cột**, tới `CK3668:CW3668`. 66 lead lệch. Lệch **bắt đầu 22/10, không phải dòng 3658**.
+- Lịch sử phiên bản (Drive revisions, so từng ô): bản 4434 (22/10 00:39 UTC) có **0 dòng trống**; bản 4478
+  (02:52 UTC, người sửa tay) có **14 dòng trống hoàn toàn** (3511, 3516, 3520, 3530, 3531, 3556, 3558, 3565,
+  3567, 3569, 3572, 3574, 3576, 3580) — xoá NỘI DUNG dòng, không xoá dòng. Cấu trúc tab (cột, lọc, validation)
+  không đổi. Cột G/H/M trống toàn bộ (chỉ có tiêu đề).
+- Mọi lượt ghi dùng chính xác `append($sheet)` của gói: range = tên tab, `OVERWRITE`.
+
+### 7.2 Tái hiện (sheet thử dữ liệu giả, cùng hình dạng)
+| Kịch bản | 3 lượt ghi liên tiếp |
+|---|---|
+| Không dòng trống, range = tên tab | A3605, A3606, A3607 |
+| 14 dòng trống, range = tên tab (cách cũ) | **I3605, Q3606, Y3607** (đúng như production) |
+| 14 dòng trống, `INSERT_ROWS` | I, Q, Y (đổi insertDataOption không cứu) |
+| 14 dòng trống, `A:M` | I, I, I |
+| 14 dòng trống, `A1` / `A1:M1` | ghi vào chính các dòng trống 3511, 3516… |
+| 14 dòng trống, **`'Tab'!A:A`** | **A3605, A3606, A3607** |
+Thêm: xoá cả dòng cuối, rác sẵn bên phải, ghi liên tiếp — `A:A` đều đúng, ghi mặc định lệch. Dòng ẩn: cả hai
+cách như nhau (lỗi cũ đã chấp nhận). Qua chính `apps_google_sheet()`: trước sửa I,Q,Y; sau sửa A,A,A.
+
+### 7.3 Đính chính audit
+- Mục 3.2 (cache/LKG header, `array_replace` lệch thứ tự) **KHÔNG phải nguyên nhân**: thứ tự cột trong từng
+  dòng luôn đúng, chỉ cột BẮT ĐẦU lệch; log 26/10 không có cảnh báo đọc header của Thaco.
+- Mục 3.1 đúng hướng; ứng viên "dán dòng từ cột I" sai, ứng viên đúng là **xoá nội dung dòng giữa bảng**.
+- Quy tắc cho khách: xoá dòng bằng "Delete row", không xoá nội dung để lại dòng trống.
+
+### 7.4 Sửa
+`'Tab'!A:A` + log phát hiện lệch + dọn range dính — xem CHANGELOG `[Unreleased]`. Chưa có lead Thaco thật nào đi
+qua code mới tại thời điểm viết; lead đầu tiên sau 27/10 13:43 phải ghi `A…:M…` (kiểm bằng `updatedRange`).

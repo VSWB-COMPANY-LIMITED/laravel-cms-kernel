@@ -447,6 +447,24 @@ if (!function_exists('apps_gsheet_header_row')) {
         return is_array($values) && isset($values[0]) && is_array($values[0]) ? $values[0] : [];
     }
 }
+if (!function_exists('apps_gsheet_append_range')) {
+    /**
+     * Range A1 để `append()` chỉ dò bảng trong cột A (tên tab bọc nháy đơn, nhân đôi nháy đơn bên trong).
+     */
+    function apps_gsheet_append_range(string $tab): string
+    {
+        return "'" . str_replace("'", "''", $tab) . "'!A:A";
+    }
+}
+if (!function_exists('apps_gsheet_range_starts_at_column_a')) {
+    /**
+     * `updatedRange` Google trả về (vd "'Raw Lead'!A3605:M3605") có bắt đầu ở cột A không.
+     */
+    function apps_gsheet_range_starts_at_column_a(?string $updatedRange): bool
+    {
+        return (bool) preg_match('/!A\d+(?::[A-Z]+\d+)?$/', (string) $updatedRange);
+    }
+}
 if (!function_exists('apps_google_sheet')) {
     /**
      * Append data to a Google Sheets spreadsheet.
@@ -964,12 +982,44 @@ if (!function_exists('apps_google_sheet')) {
                 );
             }
 
+            // 🔴 [27/10/2026] NEO TÌM BẢNG VÀO CỘT A — chữa lỗi "cột nhảy" (khách Thaco).
+            //
+            // `append()` với range = tên tab để Google TỰ DÒ bảng rồi ghi từ cột đầu của bảng đó. Khi
+            // có dòng trống hoàn toàn nằm giữa dữ liệu (khách xoá NỘI DUNG dòng thay vì xoá dòng) mà
+            // các cột Địa chỉ/Showroom/Additional data trống sẵn, Google coi phần bên phải (I..L) là
+            // "bảng" và ghi từ cột I; dòng sau lại bắt đầu ở khối cuối của dòng trước ⇒ +8 cột mỗi lượt,
+            // vô tận. Đã tái hiện bằng sheet thử: không có dòng trống ⇒ A, có 14 dòng trống ⇒ I,Q,Y...
+            // Chỉ định range `'Tab'!A:A` thì Google chỉ dò trong cột A ⇒ luôn bắt đầu ở A, kể cả khi có
+            // dòng trống. KHÔNG đổi cách ghi: vẫn append() của gói, vẫn OVERWRITE, không tự tính dòng cuối.
+            // Chỉ neo khi A1 có tiêu đề (bảng thật sự bắt đầu ở A); bảng cố ý bắt đầu ở cột khác giữ cách cũ.
+            //
             // Should explicitly specify ->spreadsheet 'spreadsheet.id', avoid reuse from previous stage,
             // Be careful with incorrect spreadsheet insertion if context stage "spreadsheet.id" is modified somewhere
-            $result = Sheets::setAccessToken($accessToken)
+            $sheetsClient = Sheets::setAccessToken($accessToken)
                 ->spreadsheet(Arr::get($spreadsheet, 'spreadsheet.id'))
                 ->sheetById(Arr::get($spreadsheet, 'sheet.id'))
-                ->append([$values]);
+                ->range(''); // range "dính" giữa các lượt dùng chung client: luôn dọn trước khi dùng
+
+            $tabTitle = (string) $sheetsClient->ranges();
+
+            try {
+                if ($tabTitle !== '' && !blank(Arr::get($headers, 0))) {
+                    $sheetsClient->range(apps_gsheet_append_range($tabTitle));
+                }
+
+                $result = $sheetsClient->append([$values]);
+            } finally {
+                $sheetsClient->range('');
+            }
+
+            $writtenRange = (string) data_get($result->toSimpleObject(), 'updates.updatedRange', '');
+            if ($writtenRange !== '' && !blank(Arr::get($headers, 0)) && !apps_gsheet_range_starts_at_column_a($writtenRange)) {
+                apps_log($logger)->error('[GSheet] Dòng vừa ghi KHÔNG bắt đầu ở cột A — nghi lệch cột', [
+                    'spreadsheet_id' => Arr::get($spreadsheet, 'spreadsheet.id'),
+                    'sheet_id' => Arr::get($spreadsheet, 'sheet.id'),
+                    'updated_range' => $writtenRange,
+                ]);
+            }
 
             // apps_log($logger)->info('[GSheet Append::Done]', [
             //     'result' => $result->toSimpleObject() ?? [],

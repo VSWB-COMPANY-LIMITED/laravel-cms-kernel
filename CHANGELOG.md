@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### Fixed
+- **[apps_google_sheet] Hết lỗi "cột nhảy": dòng lead không còn bị ghi lệch sang phải +8 cột mỗi lượt (khách
+  Thaco, 22–27/10/2026).** Gốc rễ ĐÃ ĐO: `append()` chỉ truyền tên tab nên Google tự dò "bảng". Khi sheet có
+  dòng TRỐNG HOÀN TOÀN nằm giữa dữ liệu (khách xoá nội dung dòng thay vì xoá dòng — ca thật: 14 dòng 3511–3580
+  bị xoá nội dung lúc 22/10 09:52, lead kế tiếp rơi vào cột I) mà các cột Địa chỉ/Showroom/Additional data
+  trống sẵn, Google coi khối bên phải (I..L) là bảng và ghi từ cột I; dòng sau bắt đầu ở khối cuối của dòng
+  trước ⇒ I, Q, Y, AG… vô tận (66 lead Thaco, tới cột CW). Tái hiện đủ trên sheet thử và qua chính
+  `apps_google_sheet()`: không dòng trống ⇒ A3605; 14 dòng trống ⇒ I3605, Q3606, Y3607. Sửa: chỉ định range
+  `'Tab'!A:A` (hàm `apps_gsheet_append_range()`) để Google chỉ dò bảng trong cột A ⇒ A3605, A3606, A3607 (kể
+  cả xoá cả dòng cuối, rác sẵn bên phải). KHÔNG đổi cách ghi: vẫn `append()` của gói, vẫn OVERWRITE, không tự
+  tính dòng cuối. Chỉ neo khi A1 có tiêu đề; bảng cố ý bắt đầu cột khác giữ cách cũ. Range của client dùng
+  chung được dọn trước và sau lượt ghi (`finally`). Thêm log lỗi `[GSheet] Dòng vừa ghi KHÔNG bắt đầu ở cột A`
+  (`apps_gsheet_range_starts_at_column_a()`) để lần sau phát hiện ngay thay vì im lặng. Test:
+  `tests/Unit/AppsGsheetAppendRangeTest.php`.
 - **[gdrive-mirror-cli] `name-duplicates` nay bắt đúng case "Google-native trùng tên file thật"
   (Sheet/Doc/Slide không đuôi mở rộng, export ra trùng tên 1 file thường cùng thư mục).** Phát hiện
   thật 2026-10-26: Drive có cả 1 Google Sheet tên `Dịch Vụ Hosting - Domains` (native, Drive không
