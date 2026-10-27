@@ -114,6 +114,16 @@
   `TestCollisionKey_FoldsCaseAndNormalization`, `TestResolveSiblingNames_UnicodeNormalizationCollision`,
   `TestResolveSiblingNames_LoneNFDNameIsNotRewritten` (test đầu fail trước khi sửa). Kèm: `run-mirror.ps1` hết báo đỏ `NativeCommandError` và chữ Việt trong log hết vỡ
   (exe ghi log ra stderr bằng UTF-8).
+- **[gdrive-mirror-cli] Thêm `find-name-twins.ps1` — quét/dọn cặp trùng tên NFC/NFD ở staging và OneDrive;
+  README §11.7 ghi lại lần dọn thứ hai (2026-10-27).** OneDrive vẫn báo 63 lỗi "same name as another item"
+  sau lần dọn bản xung đột: quét thấy 507 nhóm trùng (phần lớn là file con của 8 thư mục trùng). Diễn tập
+  `robocopy /L` cho thấy push thật sẽ sinh lại lỗi vì **staging cũng chứa 7 cặp trùng** (do các lượt đổi tên
+  trước đó; tool không bao giờ xoá file local). Đã chuyển (không xoá) 505 + 20 mục vào archive, chạy lại mục [2]
+  để tool tải lại đúng tên Drive: staging và OneDrive đều 0 cặp, `robocopy /L` 0 file mới, không có bản xung đột
+  mới. Script mặc định chỉ báo cáo (exit 3 nếu còn cặp), `-Apply` mới chuyển vào archive + `manifest.csv`. Test
+  trên cây giả lập 5 tình huống: ban đầu bắt được lỗi gom nhóm (bản chạy trên dữ liệu thật không chạm tới vì 0
+  nhóm), đã sửa rồi chạy report → `-Apply` → report lại. Không đổi code Go; exe trong `dist/` giữ nguyên
+  (SHA-256 khớp bản đang chạy).
 - **[gdrive-mirror-cli] `name-duplicates` nay bắt đúng case "Google-native trùng tên file thật"
   (Sheet/Doc/Slide không đuôi mở rộng, export ra trùng tên 1 file thường cùng thư mục).** Phát hiện
   thật 2026-10-26: Drive có cả 1 Google Sheet tên `Dịch Vụ Hosting - Domains` (native, Drive không

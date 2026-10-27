@@ -521,6 +521,7 @@ Scheduler): `run-mirror.bat 1` hoặc `run-mirror.bat 2` (exit code `0` sạch /
 | --- | --- | --- |
 | `run-mirror.bat` | có | Cổng mở menu; tự tìm `run-mirror.ps1` (biến `GDRIVE_PS1` → cạnh `.bat` → `C:\Tools\gdrive\`) |
 | `run-mirror.ps1` | có | Menu + logic chạy (đường dẫn staging/OneDrive/song song/retry là tham số ở đầu file) |
+| `find-name-twins.ps1` | có | Quét/dọn cặp trùng tên NFC/NFD ở staging và OneDrive (mặc định chỉ báo cáo; `-Apply` mới chuyển vào archive) — §11.7 |
 | `folders.txt` | **không** (chứa ID thật) | Danh sách folder, mỗi dòng 1 ID, ghi chú sau `#`. Mẫu: `folders.example.txt` |
 | `settings.txt` | **không** (chứa tên user/tổ chức) | **Đường dẫn và thông số**: `Staging`, `PushTo`, `Concurrency`, `Retry`. Mẫu: `settings.example.txt`. Bấm `[C]` trong menu để xem cấu hình đang dùng |
 | `gdrive-mirror.exe`, `creds.json` | exe có (`dist/`), creds **không** | Binary và service-account |
@@ -680,6 +681,34 @@ bằng `--dry-run` (ghi vào `--path` tạm) trước, không chạy thật rồ
 mất** (tool không xoá) — danh sách nằm ở `C:\gdrive-mirror-reports\onedrive-conflict-copies-<ngày>.csv`,
 soát rồi xoá tay qua web SharePoint/OneDrive. Nên đồng thời xoá/đổi tên một trong hai item trùng trên Drive.
 
+**Lần dọn thứ hai (2026-10-27) — OneDrive vẫn báo 63 lỗi "same name as another item":** quét thấy 507 nhóm cùng
+tên khác dạng dấu (phần lớn là file con của 8 thư mục trùng; OneDrive gộp còn 63 dòng lỗi). Lần dọn trước chỉ xử lý
+cặp file cùng thư mục và để nguyên cặp thư mục. Cách làm đã chạy, theo thứ tự:
+1. 505 bản thừa chỉ có ở OneDrive (nội dung đều có trong staging, 0 file riêng của người dùng) → chuyển sang
+   `C:\gdrive-archive\onedrive-twins-20261027\`.
+2. Diễn tập `robocopy /L` báo 4 file "New" mà OneDrive đã có bản trùng tên khác dạng dấu — **push thật sẽ sinh lại lỗi**.
+   Nguyên nhân: **staging cũng chứa 7 cặp trùng** (do các lượt đổi tên hôm đó). Tool không bao giờ xoá file local nên cặp
+   đã lọt vào staging thì ở lại và bị push lên mãi.
+3. Chuyển mọi biến thể của 7 nhóm khỏi CẢ staging lẫn OneDrive → chạy lại `[2]`: tool tải lại đúng tên Drive đang dùng,
+   push chỉ copy 3 file. Quét lại: 0 cặp ở cả hai bên, `robocopy /L` 0 file mới, không có bản xung đột mới.
+
+**Quy tắc rút ra: staging phải sạch cặp NFC/NFD TRƯỚC khi push.** Chọn bản nào cũng không quan trọng bằng việc để chính
+tool tải lại (nó dùng đúng tên Drive); tự giữ một bản mà Drive lại trả bản kia thì lần chạy sau cặp trùng quay lại.
+Script `find-name-twins.ps1` làm đúng các bước trên:
+
+```powershell
+powershell -File find-name-twins.ps1 -OneDrive "C:\Users\X\OneDrive - Cong ty"          # chỉ báo cáo, exit 3 nếu còn cặp
+powershell -File find-name-twins.ps1 -OneDrive "C:\Users\X\OneDrive - Cong ty" -Apply   # chuyển vào archive (không xoá)
+```
+
+- Cặp trùng ngay trong **staging** → chuyển mọi biến thể ở cả hai bên, rồi chạy lại `[2]` để tải lại.
+- Cặp chỉ ở **OneDrive** → giữ bản khớp từng byte với staging, chuyển các bản còn lại. Nhóm không bản nào khớp staging
+  thì chỉ liệt kê, không đụng.
+- Archive mặc định `C:\gdrive-archive\name-twins-<ngày>\{staging,onedrive}\…` + `manifest.csv` (cột `original`/`archived`,
+  muốn khôi phục thì chuyển ngược). Test: dựng cây giả lập có đủ 5 tình huống (OneDrive-only, trùng trong staging, thư mục
+  trùng, file thường/file riêng của người dùng, nhóm không khớp staging) — đã chạy report → `-Apply` → report lại.
+- Sau khi dọn, đợi OneDrive đồng bộ rồi kiểm tra màn hình **Sync issues**; script chỉ thấy đĩa, không đọc được trạng thái đó.
+
 **Quy trình xử lý 1 cặp từ report:**
 1. Mở `C:\gdrive-mirror-reports\name-duplicates\<folderTag>.md`, lấy 2 link Drive của cặp.
 2. Mở Google Drive — icon loại file (Sheet/Doc/Slide native khác icon Excel/Word thường) cho biết đây là "khác định dạng" hay "trùng tên thật cùng định dạng".
@@ -726,6 +755,9 @@ internal/mirror/               List (concurrent, list.go)/delta/download/retry/c
                                shrink-guard/worker-pool/incremental (Drive Changes API, incremental.go)
 internal/report/              Failed-item JSON/CSV/XLSX report writers, unexportable manifest,
                                --retry-failed loader, listing-state + incremental-manifest read/write
+run-mirror.bat / run-mirror.ps1  Menu vận hành Windows (§11.2)
+find-name-twins.ps1           Quét/dọn cặp trùng tên NFC/NFD ở staging + OneDrive (§11.7)
+dist/                         Binary dựng sẵn + SHA256SUMS
 ```
 
 Lịch sử thay đổi code: `CHANGELOG.md` (gốc repo).
