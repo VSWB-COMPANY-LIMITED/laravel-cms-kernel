@@ -169,6 +169,17 @@ function Read-Extra {
 
 # ------------------------------------------------------------- loi chay -------
 
+# Chay gdrive-mirror.exe, vua hien tren man hinh vua ghi log, tra ve exit code cua exe.
+# gdrive-mirror.exe ghi log ra STDERR. Voi `*>&1`, PowerShell 5.1 boc moi dong stderr thanh
+# ErrorRecord va in do chot "NativeCommandError" (nhin nhu loi du chay van dung). Nen chi gop
+# stderr (2>&1) roi doi ErrorRecord thanh chu thuong truoc khi hien/ghi log.
+function Invoke-Mirror([string[]]$ArgList) {
+  & $Exe @ArgList 2>&1 | ForEach-Object {
+    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
+  } | Tee-Object -FilePath $Log -Append | Out-Host
+  return $LASTEXITCODE
+}
+
 # Chay gdrive-mirror cho danh sach folder. $Push = them --push-to; $MarkDone = ghi vao state resume.
 function Invoke-Batch($Targets, [string[]]$Extra, [bool]$Push, [bool]$MarkDone) {
   if ($Targets.Count -eq 0) { Say "Khong co folder nao de chay." Yellow; return }
@@ -182,8 +193,7 @@ function Invoke-Batch($Targets, [string[]]$Extra, [bool]$Push, [bool]$MarkDone) 
     Write-Log ("CMD: " + $Exe + " " + ($args2 -join " "))
     # try/catch quanh moi vong: 1 exception bat ngo o 1 folder khong duoc lam dung ca batch.
     try {
-      & $Exe @args2 *>&1 | Tee-Object -FilePath $Log -Append
-      $code = $LASTEXITCODE
+      $code = Invoke-Mirror $args2
       Write-Log "Exit code: $code"
       if ($MarkDone -and ($code -eq 0 -or $code -eq 1) -and ($done -notcontains $f.Id)) {
         Add-Content -Path $StateFile -Value $f.Id
@@ -251,8 +261,7 @@ function Invoke-Choice([string]$Choice, $Folders) {
       $args2 = @("--retry-failed=$ReportsDir", "--path=$Staging", "--creds=$Creds", "--retry=$Retry", "--concurrency=4", "--push-to=$PushTo") + $extra
       Write-Log ("CMD: " + $Exe + " " + ($args2 -join " "))
       try {
-        & $Exe @args2 *>&1 | Tee-Object -FilePath $Log -Append
-        $code = $LASTEXITCODE; Write-Log "Exit code: $code"
+        $code = Invoke-Mirror $args2; Write-Log "Exit code: $code"
         $script:LastExit = if ($code -eq 0) { 0 } else { 1 }
       } catch { Write-Log "LOI KHONG LUONG TRUOC: $_"; $script:LastExit = 1 }
       Say "LOG: $Log" Cyan
