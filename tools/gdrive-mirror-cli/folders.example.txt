@@ -1,0 +1,12 @@
+# folders.txt -- danh sach folder Google Drive can mirror, dung boi run-mirror.ps1.
+#
+# Cach dung:
+#   1) Copy file nay thanh folders.txt, dat CANH run-mirror.ps1 (mac dinh C:\Tools\gdrive\).
+#   2) Moi dong 1 folder ID (lay tu URL .../folders/<ID>). Sau dau # la ghi chu tuy y.
+#   3) Moi folder phai duoc share cho client_email trong creds.json (quyen Viewer).
+#   4) Them folder moi: them 1 dong o cuoi, mo lai menu -- khong can sua code.
+#
+# folders.txt chua ID that cua to chuc -> KHONG commit vao git.
+
+0000000000000000000000000000000000   # vi du: Accounting
+1111111111111111111111111111111111   # vi du: Projects

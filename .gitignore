@@ -142,3 +142,6 @@ public/mockServiceWorker.js
 pm2.json
 laravel-echo-server.json
 laravel-echo-server.lock
+
+# gdrive-mirror-cli: danh sách folder ID thật của tổ chức, chỉ giữ trên máy vận hành
+tools/gdrive-mirror-cli/folders.txt

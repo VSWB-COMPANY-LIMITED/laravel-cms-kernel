@@ -1,113 +1,98 @@
 @echo off
 REM ============================================================================
-REM  run-mirror.bat -- chay dong bo Google Drive -> staging local -> OneDrive
-REM                    bang 1 cu double-click (khong can mo PowerShell)
+REM  run-mirror.bat -- MO FILE NAY LEN de dong bo Google Drive -> staging -> OneDrive
 REM ============================================================================
 REM
 REM  FILE NAY LAM GI
-REM    Chi la "vo boc" goi script PowerShell run-mirror.ps1 (tim canh file .bat nay,
-REM    khong co thi dung C:\Tools\gdrive\run-mirror.ps1), roi hien ket qua OK / CANH BAO va giu cua so de doc.
-REM    Toan bo logic dong bo (danh sach folder ID, --push-to, resume...) nam trong
-REM    run-mirror.ps1, KHONG nam o day.
-REM
-REM  YEU CAU (may van hanh Windows)
-REM    Thu muc trien khai, mac dinh C:\Tools\gdrive\, phai co du:
-REM      run-mirror.bat          <- file nay
-REM      run-mirror.ps1          <- script chinh (chua folder ID that, KHONG commit
-REM                                 vao git -- xem README muc 11.2 de dung lai)
-REM      gdrive-mirror.exe       <- binary (copy tu dist\gdrive-mirror-windows-amd64.exe)
-REM      creds.json              <- service-account JSON; cac folder Drive phai duoc
-REM                                 share cho client_email trong file nay (Viewer)
-REM      logs\                   <- tu tao; chua log moi lan chay + completed-folders.txt
+REM    Chi la cai "cong": mo menu run-mirror.ps1 trong cua so nay. Moi lua chon
+REM    (chay tiep, chay lai tat ca, chon folder, dry-run, retry loi, --force,
+REM    quet duplicate, xem log...) nam trong menu do, khong nam o day.
 REM
 REM  CACH DUNG
-REM    1) Double-click file nay, HOAC mo cmd/PowerShell va go:
-REM         C:\Tools\gdrive\run-mirror.bat
-REM    2) Cho den khi hien "Exit code: ..." -- cay folder to co the mat nhieu phut
-REM       o giai doan liet ke (im lang / chi toan WARN la BINH THUONG, khong phai treo).
-REM       Chua thay dong "Found N item(s)." = dang liet ke, chua tai.
-REM    3) Xem log: C:\Tools\gdrive\logs\run-<yyyyMMdd-HHmmss>.log
+REM    1) Double-click file nay -> hien menu -> go so muc can chay -> Enter.
+REM    2) Hoac chay thang 1 muc, khong hien menu (tien cho Task Scheduler):
+REM         run-mirror.bat 1      = Chay tiep folder chua xong
+REM         run-mirror.bat 2      = Chay lai tat ca folder
+REM       Cac muc khac can chon folder nen chi dung duoc trong menu.
+REM    3) Cay folder to co the mat nhieu phut o giai doan liet ke -- im lang hoac
+REM       chi toan WARN la BINH THUONG, khong phai treo. Chua thay "Found N item(s)."
+REM       nghia la dang liet ke, chua tai.
 REM
-REM  EXIT CODE (cua chinh file nay = exit code cua run-mirror.ps1)
-REM    0 = moi folder sach, khong loi
-REM    1 = co folder loi item hoac exception -- mo log moi nhat de xem; chay lai
-REM        duoc, delta-sync chi tai phan thieu
+REM  CAN CO TRONG C:\Tools\gdrive\  (hoac thu muc khac, xem GDRIVE_PS1 ben duoi)
+REM      run-mirror.ps1       menu + logic (co trong repo)
+REM      gdrive-mirror.exe    binary (copy tu dist\gdrive-mirror-windows-amd64.exe)
+REM      creds.json           service-account JSON; folder Drive phai share cho
+REM                           client_email trong do (Viewer)
+REM      folders.txt          danh sach folder ID, moi dong 1 ID (mau: folders.example.txt;
+REM                           KHONG commit vi chua ID that)
+REM      logs\                tu tao; log moi lan chay + completed-folders.txt (resume)
 REM
-REM  CHAY LAI / RESUME
-REM    Folder da xong duoc ghi vao logs\completed-folders.txt va se bi SKIP o lan
-REM    sau. Muon 1 folder chay lai: xoa dung dong ID cua no khoi file do (lenh mau
-REM    o README muc 11.6). Muon chay lai TOAN BO: xoa han file do -- van re vi
-REM    staging C:\GDrive-Mirror con nguyen nen delta-sync bo qua file khong doi.
+REM  TIM run-mirror.ps1 THEO THU TU
+REM    1) bien moi truong GDRIVE_PS1 neu da dat
+REM    2) file canh .bat nay
+REM    3) C:\Tools\gdrive\run-mirror.ps1
+REM
+REM  EXIT CODE  0 = thoat binh thuong / sach;  1 = co folder loi;  2 = thieu file can co
 REM
 REM  LUU Y QUAN TRONG
-REM    * DUNG build / copy de gdrive-mirror.exe khi script dang chay -- Windows
-REM      khong cho ghi de exe dang mo.
-REM    * KHONG xoa C:\GDrive-Mirror (staging): do la baseline delta-sync. Xoa di se
-REM      khien moi file Google-native bi export lai khac byte -> OneDrive sinh ban
-REM      xung dot "<ten>-DESKTOP-<may>-N.ext". Chi tiet: README muc 11.1.
-REM    * Folder moi chua share quyen cho service account se bao "Found 0 item(s)"
-REM      nhung exit code van la 0 -> bi ghi "xong gia". Share quyen TRUOC, roi xoa
-REM      ID do khoi completed-folders.txt. Chi tiet: README muc 11.3.
+REM    * DUNG build / copy de gdrive-mirror.exe khi dang chay -- Windows khong cho ghi
+REM      de exe dang mo.
+REM    * KHONG xoa C:\GDrive-Mirror (staging): la baseline delta-sync. Xoa di => moi file
+REM      Google-native bi export lai khac byte => OneDrive sinh ban xung dot
+REM      "<ten>-DESKTOP-<may>-N.ext". Chi tiet: README.md muc 11.1.
+REM    * Folder moi chua share quyen cho service account se bao "Found 0 item(s)" nhung
+REM      exit code van la 0 => bi ghi "xong gia". Share quyen TRUOC. Chi tiet: README muc 11.3.
 REM    * File nay viet ASCII khong dau co chu y: cmd.exe doc tieng Viet co dau theo
 REM      codepage may, de bi vo chu.
 REM
-REM  TAI LIEU DAY DU: README.md (cung thu muc trong repo), muc 11 "Van hanh that".
+REM  TAI LIEU DAY DU: README.md, muc 11 "Van hanh that".
 REM ============================================================================
 
-REM setlocal: bien (CODE...) chi ton tai trong file nay, khong ro ra shell goi no.
+REM setlocal: bien (PS1, CODE) chi ton tai trong file nay, khong ro ra shell goi no.
 setlocal
 
-REM Chuyen ve thu muc chua file .bat (%~dp0 = o dia + duong dan cua file nay), de
-REM chay duoc du double-click, chay tu cmd o thu muc khac, hay qua Task Scheduler.
-REM /d cho phep doi ca o dia. Nho do, copy ca bo sang may/thu muc khac van chay.
+REM Chuyen ve thu muc chua file .bat (%~dp0 = o dia + duong dan), de chay duoc du
+REM double-click, chay tu cmd o thu muc khac, hay qua Task Scheduler. /d cho phep doi o dia.
 cd /d "%~dp0"
 
-echo ===== gdrive-mirror: Drive -^> C:\GDrive-Mirror -^> OneDrive =====
-echo Bat dau: %date% %time%
-echo.
-
-REM Tim run-mirror.ps1, theo thu tu uu tien:
-REM   1) bien moi truong GDRIVE_PS1 neu da dat  2) file canh .bat nay
-REM   3) C:\Tools\gdrive\run-mirror.ps1 -- thu muc trien khai mac dinh.
-REM Muc 3 can thiet vi .ps1 chua folder ID that nen KHONG nam trong repo: chay ban .bat
-REM trong repo van tu tro sang ban o may van hanh.
+REM Tim run-mirror.ps1 -- xem thu tu uu tien o tren.
 set "PS1=%GDRIVE_PS1%"
 if not defined PS1 set "PS1=%~dp0run-mirror.ps1"
 if not exist "%PS1%" set "PS1=C:\Tools\gdrive\run-mirror.ps1"
 
-REM Kiem tra som: thieu run-mirror.ps1 thi bao ro thay vi de PowerShell tu nem loi kho hieu.
+REM Kiem tra som: thieu script thi bao ro thay vi de PowerShell tu nem loi kho hieu.
 REM Luu y: khong dung dau ngoac trong echo ben trong khoi if, cmd se hieu nham.
 if not exist "%PS1%" (
   echo [LOI] Khong tim thay run-mirror.ps1 - da thu: canh file .bat, roi C:\Tools\gdrive\
-  echo       Xem README muc 11.2 de dung lai script tren may nay.
   set CODE=2
   goto :done
 )
-echo Dung script: %PS1%
-echo.
 
 REM -NoProfile        : khong nap profile PowerShell cua user (nhanh hon, ket qua on dinh)
 REM -ExecutionPolicy Bypass : chi cho TIEN TRINH NAY, de khong bi chan script chua ky;
 REM                     KHONG doi policy he thong.
 REM -File             : chay file .ps1; exit code cua script tro thanh ERRORLEVEL o duoi.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PS1%"
+REM %~1               : tham so dau tien cua .bat (vd 1 hoac 2) -> -Action; bo trong = hien menu.
+if "%~1"=="" (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PS1%"
+) else (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -Action "%~1"
+)
 set CODE=%ERRORLEVEL%
 
 :done
 echo.
-echo Ket thuc: %date% %time%
 if %CODE% EQU 0 (
-  echo [OK] Tat ca folder xong, khong co loi.
+  echo [OK] Thoat binh thuong. Exit code: 0
 ) else if %CODE% EQU 2 (
-  echo [LOI] Thieu run-mirror.ps1 -- khong chay duoc.
+  echo [LOI] Thieu file can co ^(script / exe / creds / folders.txt^) - xem thong bao o tren. Exit code: 2
 ) else (
-  echo [CANH BAO] Co folder loi hoac exception - xem log moi nhat trong %~dp0logs
+  echo [CANH BAO] Co folder loi hoac exception - xem log moi nhat trong C:\Tools\gdrive\logs. Exit code: %CODE%
 )
-echo Exit code: %CODE%
 
-REM pause: giu cua so de doc ket qua khi double-click. Neu goi tu Task Scheduler /
-REM script khac (khong can tuong tac), xoa dong "pause" nay de khong bi treo cho.
+REM pause: giu cua so de doc ket qua khi double-click. Goi tu Task Scheduler / script khac
+REM thi xoa dong "pause" nay de khong bi treo cho.
 pause
 
-REM Tra exit code ra ngoai de scheduler/script goi nhan biet thanh cong hay that bai.
+REM Tra exit code ra ngoai de scheduler / script goi nhan biet thanh cong hay that bai.
 exit /b %CODE%

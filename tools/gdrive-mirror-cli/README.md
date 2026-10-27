@@ -486,59 +486,42 @@ vẫn **lặp từng folder ID** để 1 folder lỗi fatal không cản các fo
 Nếu THẬT SỰ cần tiết kiệm đĩa tối đa: có thể khôi phục cách xoá staging cũ (xem lịch sử git file
 này) nhưng phải **chấp nhận xung đột OneDrive lặp lại cho mọi file Google-native** mỗi lần chạy — không khuyến nghị.
 
-### 11.2 Script — `C:\Tools\gdrive\run-mirror.ps1`
+### 11.2 Menu vận hành — `run-mirror.bat` + `run-mirror.ps1`
 
-Sống trên máy vận hành (KHÔNG commit — chứa 20 folder ID + đường dẫn OneDrive cụ thể của tổ chức);
-bản dưới để dựng lại máy khác hoặc đổi danh sách folder. Bản giữ-staging, 2026-10-26:
+**Mở `C:\Tools\gdrive\run-mirror.bat` (double-click) → hiện menu → gõ số → Enter.** Script tự lặp từng
+folder, ghi log, in tổng kết. Không phải nhớ flag.
 
-```powershell
-$exe       = "C:\Tools\gdrive\gdrive-mirror.exe"
-$staging   = "C:\GDrive-Mirror"                                               # giữ VĨNH VIỄN — xem §11.1
-$pushTo    = "C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED"
-$creds     = "C:\Tools\gdrive\creds.json"
-$logDir    = "C:\Tools\gdrive\logs"
-$log       = Join-Path $logDir "run-$(Get-Date -Format yyyyMMdd-HHmmss).log"
-$stateFile = Join-Path $logDir "completed-folders.txt"   # resume -- xem §11.3
+| Mục | Làm gì | Push OneDrive? | Ghi trạng thái resume? |
+| --- | --- | --- | --- |
+| `[1]` Chạy tiếp | Chỉ folder **chưa xong** (resume) | có | có |
+| `[2]` Chạy lại TẤT CẢ | Bỏ qua resume; rẻ nhờ delta-sync | có | có |
+| `[3]` Chọn folder | Chạy riêng vài folder (`1,3,5-7` / `all`) | có | có |
+| `[4]` Dry-run | `--dry-run`: liệt kê thử 20 item, không tải | không | không |
+| `[5]` Test nhanh | `--limit=N` (N **item**, không phải N file — §5.2) | không | không |
+| `[6]` Chạy lại item LỖI | `--retry-failed` từ report lần trước (hỏi có thêm `--include-permanent`) | có | không |
+| `[7]` Tải lại toàn bộ | `--force`, phải gõ `yes` xác nhận | có | có |
+| `[8]` Quét duplicate | `--scan-duplicates`, chỉ đọc | không | không |
+| `[9]` / `[L]` / `[R]` | Trạng thái folder / 40 dòng cuối log mới nhất / mở thư mục report | — | — |
+| `[X]` | Đổi tên `completed-folders.txt` thành `.bak` (staging + OneDrive không bị đụng) | — | — |
 
-$folderIds = @("<folder-id-1>", "<folder-id-2>", ...)   # 20 ID thật — xem file trên máy
+Các mục `[1]`–`[3]`, `[5]`, `[7]`–`[8]` hỏi thêm **flag tuỳ ý** (vd `--incremental`, `--ignore-shrink`,
+`--list-concurrency=16`, `--forbid-cloud-sync-path`) — Enter để bỏ qua. Chạy không cần menu (Task
+Scheduler): `run-mirror.bat 1` hoặc `run-mirror.bat 2` (exit code `0` sạch / `1` có lỗi / `2` thiếu file).
 
-if (-not (Test-Path $staging)) { New-Item -ItemType Directory -Path $staging -Force | Out-Null }
-if (-not (Test-Path $logDir))  { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+**Các file trên máy vận hành** (`C:\Tools\gdrive\`):
 
-$alreadyDone = @()
-if (Test-Path $stateFile) { $alreadyDone = @(Get-Content $stateFile | Where-Object { $_ -ne "" }) }
+| File | Trong git? | Vai trò |
+| --- | --- | --- |
+| `run-mirror.bat` | có | Cổng mở menu; tự tìm `run-mirror.ps1` (biến `GDRIVE_PS1` → cạnh `.bat` → `C:\Tools\gdrive\`) |
+| `run-mirror.ps1` | có | Menu + logic chạy (đường dẫn staging/OneDrive/song song/retry là tham số ở đầu file) |
+| `folders.txt` | **không** (chứa ID thật) | Danh sách folder, mỗi dòng 1 ID, ghi chú sau `#`. Mẫu: `folders.example.txt` |
+| `gdrive-mirror.exe`, `creds.json` | exe có (`dist/`), creds **không** | Binary và service-account |
+| `logs\` | không | `run-<timestamp>.log` mỗi lần + `completed-folders.txt` |
 
-$summary = @()
-foreach ($id in $folderIds) {
-    if ($alreadyDone -contains $id) {
-        "`n===== $(Get-Date -Format s) Folder $id -- SKIP (da xong tu truoc, xem $stateFile) =====" |
-            Tee-Object -FilePath $log -Append
-        continue
-    }
-
-    "`n===== $(Get-Date -Format s) Folder $id =====" | Tee-Object -FilePath $log -Append
-
-    # try/catch quanh CẢ vòng lặp: 1 exception PowerShell bất ngờ ở 1 folder không được làm dừng cả batch.
-    try {
-        & $exe $id --path="$staging" --push-to="$pushTo" --creds="$creds" --retry=10 --concurrency=8 *>&1 |
-            Tee-Object -FilePath $log -Append
-        $code = $LASTEXITCODE
-        "Exit code: $code" | Tee-Object -FilePath $log -Append
-
-        if ($code -eq 0 -or $code -eq 1) {
-            Add-Content -Path $stateFile -Value $id
-        }
-        $summary += [pscustomobject]@{ FolderID = $id; ExitCode = $code }
-    } catch {
-        "LOI KHONG LUONG TRUOC, bo qua folder nay, tiep tuc folder sau: $_" | Tee-Object -FilePath $log -Append
-        $summary += [pscustomobject]@{ FolderID = $id; ExitCode = "EXCEPTION" }
-    }
-}
-
-$summary | Format-Table -AutoSize
-$failCount = ($summary | Where-Object { $_.ExitCode -ne 0 }).Count
-if ($failCount -gt 0) { exit 1 } else { exit 0 }   # exit tường minh -- xem §11.4
-```
+Dựng lại máy mới: copy `run-mirror.bat`, `run-mirror.ps1`, exe từ `dist/`; tạo `folders.txt` từ
+`folders.example.txt`; đặt `creds.json`. Mặc định của `run-mirror.ps1`: staging `C:\GDrive-Mirror`
+(**giữ vĩnh viễn** — §11.1), `--push-to` = `C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED`,
+`--concurrency=8`, `--retry=10`; đổi bằng tham số (`-Staging`, `-PushTo`, `-Concurrency`, `-Retry`, `-Base`).
 
 ### 11.3 Resume — `completed-folders.txt`
 
@@ -626,24 +609,21 @@ script xong (xem log mới nhất trong `C:\Tools\gdrive\logs`).
 
 ### 11.6 Lệnh vận hành nhanh
 
-```powershell
-# Chạy đầy đủ / chạy lại (tự skip folder đã xong) — hoặc double-click run-mirror.bat (bản trong repo, copy vào C:\Tools\gdrive\)
-cd C:\Tools\gdrive; .\run-mirror.ps1
+**Chạy: double-click `C:\Tools\gdrive\run-mirror.bat` rồi chọn số trong menu** (xem [§11.2](#112-menu-vận-hành--run-mirrorbat--run-mirrorps1)). Không cần nhớ lệnh dưới đây — chúng chỉ là bản thủ công tương đương.
 
+```powershell
 # Thêm 1 folder mới: (1) lấy client_email, (2) share folder cho email đó (Viewer),
-# (3) thêm ID vào $folderIds trong run-mirror.ps1, (4) chạy lại — chỉ folder mới chạy
+# (3) thêm 1 dòng ID vào C:\Tools\gdrive\folders.txt, (4) mở menu, chọn [1] — chỉ folder mới chạy
 Select-String '"client_email"' C:\Tools\gdrive\creds.json
 
-# Cho 1 folder chạy lại thay vì bị SKIP
+# Chạy lại 1 folder đang bị SKIP: menu [3] (chọn folder) — hoặc thủ công:
 $stateFile = "C:\Tools\gdrive\logs\completed-folders.txt"
 $idToRetry = "<folder-id-can-chay-lai>"
 (Get-Content $stateFile | Where-Object { $_ -ne $idToRetry }) | Set-Content $stateFile
-.\run-mirror.ps1
 
-# Buộc chạy lại TOÀN BỘ (vẫn RẺ nhờ delta-sync + staging còn nguyên — chỉ tốn liệt kê + so sánh)
-Remove-Item "C:\Tools\gdrive\logs\completed-folders.txt" -Force; .\run-mirror.ps1
+# Chạy lại TOÀN BỘ: menu [2] — hoặc menu [X] (đổi tên state thành .bak) rồi [1]. Vẫn RẺ nhờ delta-sync + staging còn nguyên.
 
-# Log mới nhất / tìm cảnh báo trùng tên THẬT / report duplicate
+# Log mới nhất: menu [L] — hoặc thủ công / tìm cảnh báo trùng tên THẬT / report duplicate:
 Get-ChildItem C:\Tools\gdrive\logs\run-*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 Select-String "Trùng tên THẬT" <đường-dẫn-log>
 Get-ChildItem C:\gdrive-mirror-reports\name-duplicates\
