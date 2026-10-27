@@ -667,7 +667,16 @@ coi là một tên nên xung đột lặp mãi. Cách nhận biết trên đĩa:
 `TestResolveSiblingNames_UnicodeNormalizationCollision`, `TestResolveSiblingNames_LoneNFDNameIsNotRewritten`).
 Mỗi cặp thành 1 file tên thường + 1 file `_<id>`; tên không có cặp giữ nguyên.
 **Bài học (2026-10-27):** bản đầu chuẩn hoá MỌI tên về NFC → rename-tracking dời 212 item trong staging, robocopy
-đẩy ~480 file "mới" lên OneDrive cạnh bản tên NFD cũ (`Extras` 201→410, xung đột 196→242). Đã bỏ cách đó. **Các bản `-N` đã sinh ra từ trước KHÔNG tự
+đẩy ~480 file "mới" lên OneDrive cạnh bản tên NFD cũ (`Extras` 201→410, xung đột 196→242). Đã bỏ cách đó.
+**Dời qua lại tên trong staging cũng tự nó đẻ xung đột:** chạy bản đã sửa để dời 212 item về lại tên NFD lại đẩy
+thêm ~150 file và xung đột 242→379 — OneDrive coi NFC/NFD là một tên nên mỗi lần ghi từ nguồn thứ hai là một bản
+`-N`. Quy tắc: **đừng đổi hàng loạt tên trong staging khi staging đã được push lên OneDrive**; thử trên Drive thật
+bằng `--dry-run` (ghi vào `--path` tạm) trước, không chạy thật rồi mới xem.
+**Dọn dẹp đã làm (2026-10-27):** 412 bản xung đột của file có trong mirror được CHUYỂN (không xoá) sang
+`C:\gdrive-archive\onedrive-conflicts-20261027\`, giữ nguyên cây thư mục; danh sách + đường dẫn gốc ở
+`C:\gdrive-mirror-reports\archived-onedrive-conflicts-20261027.csv` (muốn khôi phục: chuyển ngược theo cột
+`archived` → `original`). Không đụng `_duplicates_legacy` và 66 bản xung đột không thuộc mirror. Còn lại 3 cặp
+(Google Sheet/Doc gốc + file `.xlsx`/`.docx` upload tay trùng tên) cần xử lý TRÊN DRIVE theo quy trình dưới. **Các bản `-N` đã sinh ra từ trước KHÔNG tự
 mất** (tool không xoá) — danh sách nằm ở `C:\gdrive-mirror-reports\onedrive-conflict-copies-<ngày>.csv`,
 soát rồi xoá tay qua web SharePoint/OneDrive. Nên đồng thời xoá/đổi tên một trong hai item trùng trên Drive.
 
