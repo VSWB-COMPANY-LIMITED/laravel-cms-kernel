@@ -1,0 +1,24 @@
+# settings.txt -- cau hinh duong dan cho run-mirror.ps1.
+#
+# Cach dung:
+#   1) Copy file nay thanh settings.txt, dat CANH run-mirror.ps1 (mac dinh C:\Tools\gdrive\).
+#   2) Sua gia tri cho dung may nay. Moi dong "Khoa = gia tri"; dong bat dau bang # la ghi chu.
+#      Duong dan co dau cach thi cu viet nguyen, khong can cap nhay.
+#   3) Mo menu -> bam [C] de xem cau hinh dang dung.
+#
+# Thu tu uu tien: tham so dong lenh (-Staging ...) > file nay > mac dinh.
+# File nay chua ten nguoi dung / to chuc -> KHONG commit vao git.
+
+# Thu muc tai ve tam tren o local (staging). GIU VINH VIEN, dung xoa: la baseline delta-sync
+# (xoa di => OneDrive sinh ban xung dot -DESKTOP-...; xem README muc 11.1). Mac dinh: C:\GDrive-Mirror
+Staging = C:\GDrive-Mirror
+
+# Thu muc dich de dong bo sang (thuong la thu muc OneDrive / Google Drive / Dropbox dang chay).
+# BAT BUOC, khong co mac dinh. Tool chi them/cap nhat, khong xoa gi o day.
+PushTo = C:\Users\<ten-user>\OneDrive - <ten-to-chuc>
+
+# So file tai song song. SSD + mang nhanh: 8; HDD/USB/NAS hoac mang yeu: 2-4. Mac dinh: 8
+Concurrency = 8
+
+# So lan thu lai moi thao tac khi mang loi (backoff 2s/4s/8s.. toi da 30s). Mac dinh: 10
+Retry = 10

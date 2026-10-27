@@ -8,12 +8,20 @@
 #  File nay viet ASCII khong dau co chu y: PowerShell 5.1 doc file khong co BOM theo
 #  codepage may, tieng Viet co dau se vo chu.
 #
-#  CAC FILE CAN CO (mac dinh trong $Base = C:\Tools\gdrive):
+#  CAC FILE CAN CO (trong $Base; mac dinh la thu muc chua script nay neu co folders.txt /
+#  settings.txt canh no, khong thi C:\Tools\gdrive):
 #    gdrive-mirror.exe   binary (copy tu dist\gdrive-mirror-windows-amd64.exe)
 #    creds.json          service-account JSON; folder Drive phai share cho client_email (Viewer)
 #    folders.txt         DANH SACH FOLDER ID, moi dong 1 ID, chu thich sau dau #
 #                        (mau: folders.example.txt). KHONG commit vao git.
+#    settings.txt        CAU HINH DUONG DAN: Staging, PushTo, Concurrency, Retry
+#                        (mau: settings.example.txt). KHONG commit vao git.
 #    logs\               tu tao: log moi lan chay + completed-folders.txt (trang thai resume)
+#
+#  THU TU UU TIEN CAU HINH:  tham so dong lenh (-Staging ...)  >  settings.txt  >  mac dinh.
+#    Mac dinh: Staging = C:\GDrive-Mirror, Concurrency = 8, Retry = 10.
+#    PushTo KHONG co mac dinh (la duong dan OneDrive cua tung may) -> bat buoc khai bao trong
+#    settings.txt hoac -PushTo; thieu thi script bao loi va thoat (exit 2).
 #
 #  CHAY KHONG CAN MENU (Task Scheduler / script khac):
 #    powershell -File run-mirror.ps1 -Action 1      # = muc [1] Chay tiep folder chua xong
@@ -33,17 +41,46 @@
 # ============================================================================
 
 param(
-  [string]$Action = "",                                   # bo trong = hien menu; "1".."9" = chay thang muc do
-  [string]$Base = "C:\Tools\gdrive",                      # thu muc trien khai
-  [string]$Exe = "",                                      # mac dinh: $Base\gdrive-mirror.exe
-  [string]$Creds = "",                                    # mac dinh: $Base\creds.json
-  [string]$LogDir = "",                                   # mac dinh: $Base\logs
-  [string]$FoldersFile = "",                              # mac dinh: $Base\folders.txt
-  [string]$Staging = "C:\GDrive-Mirror",                  # staging local, GIU VINH VIEN
-  [string]$PushTo = "C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED",
-  [int]$Concurrency = 8,                                  # so file tai song song; HDD/USB/NAS: 2-4
-  [int]$Retry = 10                                        # so lan thu lai moi thao tac khi mang loi
+  [string]$Action = "",        # bo trong = hien menu; "1".."9" = chay thang muc do
+  [string]$Base = "",          # thu muc trien khai (xem "CAC FILE CAN CO" o tren)
+  [string]$Exe = "",           # mac dinh: $Base\gdrive-mirror.exe
+  [string]$Creds = "",         # mac dinh: $Base\creds.json
+  [string]$LogDir = "",        # mac dinh: $Base\logs
+  [string]$FoldersFile = "",   # mac dinh: $Base\folders.txt
+  [string]$Staging = "",       # staging local, GIU VINH VIEN. Mac dinh: settings.txt, roi C:\GDrive-Mirror
+  [string]$PushTo = "",        # thu muc OneDrive dich. Mac dinh: settings.txt (khong co mac dinh cung)
+  [int]$Concurrency = 0,       # so file tai song song; HDD/USB/NAS: 2-4. Mac dinh: settings.txt, roi 8
+  [int]$Retry = 0              # so lan thu lai moi thao tac khi mang loi. Mac dinh: settings.txt, roi 10
 )
+
+# $Base: thu muc chua script nay neu co folders.txt / settings.txt canh no (cai dat tai cho),
+# nguoc lai C:\Tools\gdrive (vd khi chay ban .ps1 trong repo).
+if (-not $Base) {
+  if ((Test-Path (Join-Path $PSScriptRoot "folders.txt")) -or (Test-Path (Join-Path $PSScriptRoot "settings.txt"))) { $Base = $PSScriptRoot }
+  else { $Base = "C:\Tools\gdrive" }
+}
+
+# settings.txt: moi dong "Khoa = gia tri", bo dong trong / dong bat dau bang #. Gia tri giu nguyen
+# dau cach ben trong (duong dan OneDrive co dau cach), bo cap nhay bao quanh neu co.
+$SettingsFile = Join-Path $Base "settings.txt"
+$cfg = @{}
+if (Test-Path $SettingsFile) {
+  $known = @("Staging", "PushTo", "Concurrency", "Retry")
+  foreach ($line in (Get-Content $SettingsFile -Encoding UTF8)) {
+    $t = $line.Trim()
+    if ($t -eq "" -or $t.StartsWith("#")) { continue }
+    $i = $t.IndexOf("=")
+    if ($i -lt 1) { Write-Host "[CANH BAO] settings.txt: bo qua dong khong co dau '=': $t" -ForegroundColor Yellow; continue }
+    $k = $t.Substring(0, $i).Trim(); $v = $t.Substring($i + 1).Trim().Trim('"')
+    if ($known -notcontains $k) { Write-Host "[CANH BAO] settings.txt: khoa la '$k' (hop le: $($known -join ', '))" -ForegroundColor Yellow; continue }
+    $cfg[$k] = $v
+  }
+}
+
+if (-not $Staging)     { $Staging = if ($cfg.Staging) { $cfg.Staging } else { "C:\GDrive-Mirror" } }
+if (-not $PushTo)      { $PushTo = $cfg.PushTo }
+if ($Concurrency -lt 1) { $Concurrency = if ($cfg.Concurrency -match '^\d+$' -and [int]$cfg.Concurrency -ge 1) { [int]$cfg.Concurrency } else { 8 } }
+if ($Retry -lt 1)       { $Retry = if ($cfg.Retry -match '^\d+$' -and [int]$cfg.Retry -ge 1) { [int]$cfg.Retry } else { 10 } }
 
 if (-not $Exe)         { $Exe = Join-Path $Base "gdrive-mirror.exe" }
 if (-not $Creds)       { $Creds = Join-Path $Base "creds.json" }
@@ -236,6 +273,19 @@ function Invoke-Choice([string]$Choice, $Folders) {
       if ($Folders.Count -eq 0) { Say "Chua co folder nao trong $FoldersFile" Red } else { Show-Folders $Folders }
       Say "Trang thai doc tu: $StateFile" DarkGray
     }
+    "C" {  # xem cau hinh dang dung
+      Say "Cau hinh dang dung (uu tien: tham so dong lenh > settings.txt > mac dinh):" Cyan
+      Say "  Base         : $Base"
+      Say "  Staging      : $Staging     (giu vinh vien)"
+      Say "  PushTo       : $PushTo"
+      Say "  Concurrency  : $Concurrency"
+      Say "  Retry        : $Retry"
+      Say "  Exe          : $Exe"
+      Say "  Creds        : $Creds"
+      Say "  Folders      : $FoldersFile"
+      Say "  Reports      : $ReportsDir"
+      Say "  Settings     : $SettingsFile $(if (Test-Path $SettingsFile) { '(co)' } else { '(chua co - dang dung mac dinh)' })"
+    }
     "L" {  # xem log moi nhat
       $latest = Get-ChildItem (Join-Path $LogDir "run-*.log") -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
       if (-not $latest) { Say "Chua co log nao trong $LogDir" Yellow; return }
@@ -278,7 +328,7 @@ function Show-Menu($Folders) {
   Say "  [6] Chay lai item LOI   --retry-failed tu report lan truoc"
   Say "  [7] Tai lai toan bo     --force (can xac nhan)"
   Say " THONG TIN"
-  Say "  [9] Trang thai folder   [L] Xem log moi nhat   [R] Mo thu muc report"
+  Say "  [9] Trang thai folder   [C] Xem cau hinh   [L] Xem log moi nhat   [R] Mo thu muc report"
   Say "  [X] Xoa trang thai resume (doi ten thanh .bak)"
   Say "  [0] Thoat"
   Say "=======================================================" Cyan
@@ -294,6 +344,8 @@ $problems = @()
 if (-not (Test-Path $Exe))         { $problems += "Thieu binary: $Exe  (copy tu dist\gdrive-mirror-windows-amd64.exe)" }
 if (-not (Test-Path $Creds))       { $problems += "Thieu creds: $Creds" }
 if (-not (Test-Path $FoldersFile)) { $problems += "Thieu danh sach folder: $FoldersFile  (copy tu folders.example.txt roi dien ID that)" }
+if (-not $PushTo)                  { $problems += "Chua khai bao PushTo (thu muc OneDrive dich). Tao $SettingsFile tu settings.example.txt, hoac truyen -PushTo" }
+elseif (-not (Test-Path $PushTo))  { $problems += "PushTo khong ton tai: $PushTo  (OneDrive chua cai/chua dang nhap, hoac sai duong dan trong $SettingsFile)" }
 if ($problems.Count -gt 0) {
   $problems | ForEach-Object { Say "[LOI] $_" Red }
   exit 2

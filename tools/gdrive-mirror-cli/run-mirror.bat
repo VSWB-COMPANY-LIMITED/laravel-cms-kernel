@@ -23,6 +23,8 @@ REM      run-mirror.ps1       menu + logic (co trong repo)
 REM      gdrive-mirror.exe    binary (copy tu dist\gdrive-mirror-windows-amd64.exe)
 REM      creds.json           service-account JSON; folder Drive phai share cho
 REM                           client_email trong do (Viewer)
+REM      settings.txt         duong dan Staging / PushTo (OneDrive) / Concurrency / Retry
+REM                           (mau: settings.example.txt; KHONG commit) -- DOI PATH O DAY
 REM      folders.txt          danh sach folder ID, moi dong 1 ID (mau: folders.example.txt;
 REM                           KHONG commit vi chua ID that)
 REM      logs\                tu tao; log moi lan chay + completed-folders.txt (resume)

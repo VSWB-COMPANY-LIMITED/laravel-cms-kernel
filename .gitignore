@@ -145,3 +145,5 @@ laravel-echo-server.lock
 
 # gdrive-mirror-cli: danh sách folder ID thật của tổ chức, chỉ giữ trên máy vận hành
 tools/gdrive-mirror-cli/folders.txt
+
+tools/gdrive-mirror-cli/settings.txt

@@ -501,7 +501,7 @@ folder, ghi log, in tổng kết. Không phải nhớ flag.
 | `[6]` Chạy lại item LỖI | `--retry-failed` từ report lần trước (hỏi có thêm `--include-permanent`) | có | không |
 | `[7]` Tải lại toàn bộ | `--force`, phải gõ `yes` xác nhận | có | có |
 | `[8]` Quét duplicate | `--scan-duplicates`, chỉ đọc | không | không |
-| `[9]` / `[L]` / `[R]` | Trạng thái folder / 40 dòng cuối log mới nhất / mở thư mục report | — | — |
+| `[9]` / `[C]` / `[L]` / `[R]` | Trạng thái folder / xem cấu hình đang dùng / 40 dòng cuối log mới nhất / mở thư mục report | — | — |
 | `[X]` | Đổi tên `completed-folders.txt` thành `.bak` (staging + OneDrive không bị đụng) | — | — |
 
 Các mục `[1]`–`[3]`, `[5]`, `[7]`–`[8]` hỏi thêm **flag tuỳ ý** (vd `--incremental`, `--ignore-shrink`,
@@ -515,13 +515,19 @@ Scheduler): `run-mirror.bat 1` hoặc `run-mirror.bat 2` (exit code `0` sạch /
 | `run-mirror.bat` | có | Cổng mở menu; tự tìm `run-mirror.ps1` (biến `GDRIVE_PS1` → cạnh `.bat` → `C:\Tools\gdrive\`) |
 | `run-mirror.ps1` | có | Menu + logic chạy (đường dẫn staging/OneDrive/song song/retry là tham số ở đầu file) |
 | `folders.txt` | **không** (chứa ID thật) | Danh sách folder, mỗi dòng 1 ID, ghi chú sau `#`. Mẫu: `folders.example.txt` |
+| `settings.txt` | **không** (chứa tên user/tổ chức) | **Đường dẫn và thông số**: `Staging`, `PushTo`, `Concurrency`, `Retry`. Mẫu: `settings.example.txt`. Bấm `[C]` trong menu để xem cấu hình đang dùng |
 | `gdrive-mirror.exe`, `creds.json` | exe có (`dist/`), creds **không** | Binary và service-account |
 | `logs\` | không | `run-<timestamp>.log` mỗi lần + `completed-folders.txt` |
 
-Dựng lại máy mới: copy `run-mirror.bat`, `run-mirror.ps1`, exe từ `dist/`; tạo `folders.txt` từ
-`folders.example.txt`; đặt `creds.json`. Mặc định của `run-mirror.ps1`: staging `C:\GDrive-Mirror`
-(**giữ vĩnh viễn** — §11.1), `--push-to` = `C:\Users\KUN\OneDrive - VISUAL WEBER COMPANY LIMITED`,
-`--concurrency=8`, `--retry=10`; đổi bằng tham số (`-Staging`, `-PushTo`, `-Concurrency`, `-Retry`, `-Base`).
+Dựng lại máy mới: copy `run-mirror.bat`, `run-mirror.ps1`, exe từ `dist/`; tạo `folders.txt` và
+`settings.txt` từ các file `*.example.txt`; đặt `creds.json`.
+
+**Đổi đường dẫn = sửa `settings.txt`** (không sửa code, không sửa `.bat`). Thứ tự ưu tiên: tham số
+dòng lệnh của `run-mirror.ps1` (`-Staging`, `-PushTo`, `-Concurrency`, `-Retry`, `-Base`) > `settings.txt` > mặc định
+(`Staging=C:\GDrive-Mirror`, `Concurrency=8`, `Retry=10`). **`PushTo` không có mặc định** (là đường dẫn OneDrive
+của từng máy): thiếu hoặc trỏ tới thư mục không tồn tại thì script báo lỗi và thoát với exit code `2`.
+`Staging` **giữ vĩnh viễn** (§11.1). `Base` mặc định là thư mục chứa `run-mirror.ps1` nếu có `folders.txt`/`settings.txt`
+cạnh nó, không thì `C:\Tools\gdrive`.
 
 ### 11.3 Resume — `completed-folders.txt`
 
