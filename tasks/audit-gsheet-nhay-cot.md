@@ -6,6 +6,25 @@
 > nhận việc tự đo lại từ đầu (đọc log, version history, tái hiện bug...) trước khi quyết định hướng
 > xử lý, có quyền bác bỏ hoặc đổi hướng nếu dữ kiện mới không khớp với audit này.
 
+## ⛔ BẮT BUỘC với agent thực thi — đọc trước khi đụng vào code
+
+**Các giả thuyết trong tài liệu này đã được xác nhận là KHÔNG phải nguyên nhân của sự cố.**
+- Gốc rễ thật: dòng trống nằm giữa dữ liệu làm Google dò sai bảng.
+- Đã đo và sửa ở commit `eccf4b9`: neo `append()` vào `'Tab'!A:A`.
+- Các giả thuyết về cache header và trùng tên cột ở dưới chỉ còn là rủi ro tiềm ẩn **chưa được
+  chứng minh**.
+
+**Không được tin tuyệt đối vào bất kỳ câu nào ở đây.** Agent thực thi **bắt buộc** áp dụng đầy đủ
+quy trình **"BẮT BUỘC"** ở đầu `tasks/audit-he-thong-toi-uu-chuyen-sau.md`:
+- tự kiểm chứng tại nguồn trên code hiện tại;
+- tự đo trước và sau;
+- tự phản biện từng giải pháp;
+- tái hiện trước, sửa sau;
+- ghi bằng chứng;
+- dừng khi không kiểm chứng được.
+
+Bất kỳ thay đổi nào chạm vào khối `append()` (vùng "ĐỪNG SỬA") đều phải hỏi chủ sản phẩm trước.
+
 ## 1. Tình trạng lỗi (triệu chứng quan sát được)
 
 - Sheet khách: *Thaco CV_Raw Lead* —

@@ -1,9 +1,55 @@
 # Audit chuyên sâu — giải pháp tối ưu logic & hiệu năng (lượt 2)
 
-> Trạng thái: **AUDIT — chưa sửa code.** Đây là **tài liệu hỗ trợ**, không phải chỉ thị. Mọi mức ưu
-> tiên, ước lượng và giải pháp dưới đây là gợi ý tham khảo; agent nhận việc tự đo lại (log thời gian,
-> đếm request, EXPLAIN, profiler) trước khi quyết định làm gì, theo thứ tự nào, và có quyền bác bỏ
-> nếu số liệu thật không khớp.
+> Trạng thái: **AUDIT — chưa sửa code.** Các **đề xuất** (mức ưu tiên, ước lượng, giải pháp, thứ tự)
+> chỉ để tham khảo. Agent nhận việc tự quyết làm gì, theo thứ tự nào, và có quyền bác bỏ.
+> Riêng **quy trình kiểm chứng ở mục "BẮT BUỘC" ngay dưới đây là bắt buộc, không có ngoại lệ.**
+
+## ⛔ BẮT BUỘC với agent thực thi — đọc và tuân thủ trước khi đụng vào code
+
+**Tài liệu này có thể sai.**
+- Lượt audit trước đã sai 4 nhận định (xem mục 1).
+- Code có thể đã thay đổi sau khi tài liệu được viết.
+- Số liệu ở đây là suy ra từ code, chưa từng đo trên môi trường thật.
+
+**KHÔNG được tin tuyệt đối vào bất kỳ câu nào trong tài liệu này**, kể cả mục đánh dấu ✅. Dấu ✅ chỉ
+nghĩa là "người viết đã đọc code tại thời điểm viết", không phải "đã được chứng minh đúng".
+
+Với **mỗi** mục định xử lý, agent thực thi **bắt buộc** làm đủ 6 bước sau. Thiếu bước nào thì
+không được sửa mục đó:
+
+1. **Tự kiểm chứng tại nguồn.**
+   - Mở đúng file/hàm trên code **hiện tại** của nhánh làm việc (số dòng trong tài liệu có thể đã
+     lệch) và đọc tận nơi.
+   - Xác nhận vấn đề **còn tồn tại** và **đúng như mô tả**.
+   - Kiểm chứng cả tiền đề phụ thuộc bên ngoài repo. Ví dụ hành vi của gói
+     `revolution/laravel-google-sheets` trong `vendor/` của app, cấu hình `config:cache` trên server,
+     driver session/cache đang dùng.
+   - Không khớp ⇒ ghi lại là tài liệu sai, **không** làm theo tài liệu.
+2. **Tự đo trước và sau.**
+   - Lấy **số đo nền trước khi sửa**: thời gian, số request, số query, số dòng log… (xem mục 6).
+   - Đo lại **sau khi sửa** bằng đúng cách đó.
+   - Mọi con số "ước lượng" trong tài liệu chỉ là **giả thuyết**. Cấm trích lại chúng như kết quả,
+     cấm dùng chúng để biện minh cho thay đổi.
+   - Không đo được cải thiện ⇒ không coi là tối ưu thành công.
+3. **Tự phản biện từng giải pháp.** Trước khi viết code, trả lời thành văn bản:
+   - (a) Trong điều kiện nào giải pháp này **sai hoặc gây hại**?
+   - (b) Có cách nào **rẻ hơn / ít rủi ro hơn** không?
+   - (c) Ảnh hưởng tới **mọi nơi gọi**? Phải grep đủ, kể cả app tiêu thụ kernel nếu có quyền đọc.
+   - (d) Có chạm vào vùng code mang cảnh báo **"ĐỪNG SỬA"** hoặc quyết định **đã chốt** của chủ sản
+     phẩm không? Ví dụ khối `append()` trong `apps_google_sheet()`, việc commit `dist/`.
+   - Có chạm ⇒ dừng, hỏi người dùng.
+4. **Tái hiện trước, sửa sau.**
+   - Với bug: viết test hoặc kịch bản tái hiện và thấy nó **thất bại** trước khi sửa, rồi thấy nó
+     **qua** sau khi sửa.
+   - Với tối ưu: có test khoá hành vi cũ để chứng minh kết quả đầu ra **không đổi**.
+5. **Ghi bằng chứng.** Commit/PR phải ghi:
+   - đã kiểm chứng gì, bằng cách nào;
+   - số đo trước/sau;
+   - chỗ nào tài liệu này sai;
+   - mục nào bỏ qua và vì sao.
+6. **Dừng khi không kiểm chứng được.** Thiếu quyền xem log production, không có DB thật, không truy
+   cập được app tiêu thụ… ⇒ dừng ở mục đó và báo người dùng điều còn thiếu. **Không suy diễn để làm
+   tiếp.**
 >
 > Bổ sung cho `tasks/audit-he-thong-toi-uu.md` (lượt 1). Lượt 2 khác lượt 1 ở 3 điểm: (1) **tự đọc
 > lại code để kiểm chứng** từng phát hiện, đính chính chỗ sai của lượt 1 (mục 1); (2) đọc thêm
@@ -14,9 +60,10 @@
 code đổi.
 
 **Ký hiệu độ tin cậy:**
-- ✅ = đã tự đọc code và xác nhận.
-- 🔎 = do agent đọc song song báo cáo; đã xem qua nhưng chưa tự kiểm từng dòng. Nên xác nhận lại
-  trước khi làm.
+- ✅ = người viết đã tự đọc code và xác nhận **tại thời điểm viết**. Agent thực thi **vẫn phải tự
+  kiểm lại** theo mục BẮT BUỘC.
+- 🔎 = do agent đọc song song báo cáo; người viết mới xem qua, chưa tự kiểm từng dòng. **Độ tin cậy
+  thấp hơn.** Phải kiểm kỹ hơn trước khi làm.
 - Mọi con số "ước lượng" là **suy ra từ code**, chưa đo trên môi trường thật.
 
 ---
@@ -472,7 +519,7 @@ transport đã chỉnh `MaxIdleConnsPerHost`, giữ HTTP/2. Phần còn lại:
 
 ---
 
-## 7. Gợi ý thứ tự (tham khảo — agent tự quyết)
+## 7. Gợi ý thứ tự (tham khảo — agent tự quyết; mỗi bước vẫn phải qua mục BẮT BUỘC)
 
 - **Đợt 0, đo:** gắn đo thời gian từng bước ghi Sheet và đếm request/query (mục 6). Làm nhanh,
   không đổi hành vi.
@@ -497,5 +544,5 @@ transport đã chỉnh `MaxIdleConnsPerHost`, giữ HTTP/2. Phần còn lại:
 ---
 *Tài liệu do Claude tạo trong phiên audit theo yêu cầu người dùng. Tự đọc lại code để kiểm chứng
 (đánh dấu ✅), kết hợp 2 lượt đọc song song cho `GDriveMirrorSync.php` và Go CLI (đánh dấu 🔎).
-Không có thay đổi nào tới code sản xuất. Toàn bộ nội dung là tài liệu hỗ trợ/tham khảo cho agent
-nhận việc, không phải chỉ thị.*
+Không có thay đổi nào tới code sản xuất. Phần đề xuất là tham khảo; phần BẮT BUỘC (tự kiểm chứng,
+tự đo, tự phản biện, không tin tuyệt đối tài liệu) là điều kiện bắt buộc với mọi agent thực thi.*

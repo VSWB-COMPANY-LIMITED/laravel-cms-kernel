@@ -6,6 +6,29 @@
 > việc tự đọc lại code, tự đo lại (profiling, log thật, EXPLAIN query...) trước khi quyết định làm
 > gì, theo thứ tự nào, có quyền bác bỏ hoặc đổi hướng nếu dữ kiện mới không khớp.
 
+## ⛔ BẮT BUỘC với agent thực thi — đọc trước khi đụng vào code
+
+**Tài liệu này đã được xác nhận là có chỗ SAI.** Lượt kiểm chứng sau
+(`tasks/audit-he-thong-toi-uu-chuyen-sau.md`, mục 1) đã đính chính 4 nhận định:
+- mảng tỉnh/huyện;
+- file tạo bảng `licenses`;
+- `notes`/`description`;
+- cron sinh nhật.
+
+Phần còn lại cũng có thể sai, hoặc đã lỗi thời do code thay đổi. **Không được tin tuyệt đối vào bất
+kỳ câu nào ở đây.**
+
+Agent thực thi **bắt buộc** áp dụng đầy đủ quy trình **"BẮT BUỘC"** ở đầu
+`tasks/audit-he-thong-toi-uu-chuyen-sau.md` cho mọi mục định xử lý:
+- tự kiểm chứng tại nguồn trên code hiện tại;
+- tự đo trước và sau;
+- tự phản biện từng giải pháp;
+- tái hiện trước, sửa sau;
+- ghi bằng chứng;
+- dừng khi không kiểm chứng được.
+
+Ưu tiên đọc bản chuyên sâu trước; tài liệu này chỉ để đối chiếu.
+
 ## 0. Phạm vi đã đọc / chưa đọc
 
 **Đã audit (read-only, 4 lượt đọc song song):**
