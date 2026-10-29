@@ -873,12 +873,13 @@ if (!function_exists('apps_google_sheet')) {
                 "error" => false,
                 'code' => Response::HTTP_OK,
                 'statusCode' => Response::HTTP_OK,
-                "data" => [
+                // array_merge thay cho spread `...`: spread mảng có key chuỗi chỉ chạy từ PHP 8.1; trên
+                // PHP 7.4/8.0 nó ném lỗi SAU KHI dòng đã ghi ⇒ nơi gọi tưởng thất bại, thử lại, ghi trùng.
+                "data" => array_merge([
                     'workbookId' => Arr::get($spreadsheet, 'spreadsheet.id', null),
                     'sheetId' => Arr::get($spreadsheet, 'sheet.id', null),
                     'sheetName' => Arr::get($spreadsheet, 'sheet.name', null),
-                    ...(array) $result->toSimpleObject()
-                ],
+                ], (array) $result->toSimpleObject()),
                 "message" => "Request has been successfully processed"
             ]);
         } catch (\Throwable $th) {
@@ -971,6 +972,9 @@ if (!function_exists('apps_google_sheet_update_by_log')) {
                 'error' => true,
                 'message' => 'Update failed: ' . $e->getMessage(),
             ];
+        } finally {
+            // `Sheets` của gói 5.x/6.x là singleton: range để lại sẽ rò sang lượt đọc header/ghi kế tiếp.
+            Sheets::range('');
         }
     }
 }
@@ -981,7 +985,7 @@ if (!function_exists('apps_phone_convert')) {
         if (!$phonenumber)
             return false;
         try {
-            $phonenumber = preg_replace("/[^0-9.]/", "", $phonenumber); // get number only, eg: p:+84982311866
+            $phonenumber = preg_replace("/[^0-9]/", "", $phonenumber); // get number only, eg: p:+84982311866, 0982.311.866
             if (mb_strlen($phonenumber) > 10 && substr($phonenumber, 0, 2) == '84') { // only for vietnam, eg: 84982311866
                 $phonenumber = "0" . substr($phonenumber, 2);
             }
@@ -1020,6 +1024,22 @@ if (!function_exists('apps_currency_exchange')) {
     }
 }
 
+if (!function_exists('apps_env')) {
+    /**
+     * Đọc biến môi trường an toàn cả khi đã `php artisan config:cache`.
+     *
+     * Khi config đã cache, Laravel không nạp .env nữa: env() gọi lúc chạy (ngoài file config) trả null,
+     * nên default bị dùng thay cho giá trị thật (vd staging gọi login sang URL production). Giá trị được
+     * chụp sẵn ở config('kernel.general.env.<KEY>'); chưa có thì rơi về env() như cũ.
+     */
+    function apps_env(string $key, $default = null)
+    {
+        $value = config('kernel.general.env.' . $key);
+
+        return $value !== null ? $value : env($key, $default);
+    }
+}
+
 if (!function_exists('apps_log_channel')) {
     /**
      * Tạo logger channel động theo tên + optional author_id
@@ -1038,7 +1058,7 @@ if (!function_exists('apps_log_channel')) {
                 Config::set("logging.channels.{$loggerName}", [
                     'driver' => 'daily',
                     'path'   => storage_path("logs/{$loggerName}.log"),
-                    'level'  => env('APP_LOG_LEVEL', 'debug'),
+                    'level'  => apps_env('APP_LOG_LEVEL', 'debug'),
                     'days'   => 14,
                     'lazy'   => true, // tối ưu I/O ghi disk, không nên bật nếu ghi log quan trọng liên quan tới log tài chính vì cần phải ghi ngay.
                 ]);
@@ -1256,7 +1276,7 @@ if (!function_exists('apps_pull_login')) {
                 return $result;
             })(
                 $method,
-                env('APP_URL', 'https://apis.pull.vn') . "/api/v1/login",
+                apps_env('APP_URL', 'https://apis.pull.vn') . "/api/v1/login",
                 [
                     'email' => $email,
                     'password' => $password
@@ -1372,7 +1392,7 @@ if (!function_exists('apps_vtiger_login')) {
                 return $result; // return json string
             })(
                 $method,
-                env('VTIGER_REDIRECT'),
+                apps_env('VTIGER_REDIRECT'),
                 [
                     'username' => $username,
                     'accessKey' => $accessKey
@@ -1886,10 +1906,8 @@ if (!function_exists('apps_telegram_send_message')) {
             ];
 
             if (!blank($configs)) {
-                $telegramDfOptions = [
-                    ...$telegramDfOptions,
-                    ...$configs // high priority & override
-                ];
+                // array_merge thay cho spread `...` (spread mảng key chuỗi chỉ chạy từ PHP 8.1).
+                $telegramDfOptions = array_merge($telegramDfOptions, $configs); // $configs: high priority & override
             }
 
             // apps_log($logger)->info("configs", $configs);
