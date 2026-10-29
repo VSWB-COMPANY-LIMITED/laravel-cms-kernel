@@ -39,4 +39,12 @@ return [
         'TELEGRAM_MESSAGE_THREAD_ID' => env('TELEGRAM_MESSAGE_THREAD_ID'),
         'TELEGRAM_BOT_TOKEN' => env('TELEGRAM_BOT_TOKEN'),
     ],
+
+    // [29/10/2026] Trần thời gian cho 5 hàm apps_*_login (CRM đối tác). Trước đây không hàm nào
+    // đặt CURLOPT_CONNECTTIMEOUT/CURLOPT_TIMEOUT ⇒ cURL mặc định chờ VÔ HẠN, CRM đối tác treo là
+    // worker hàng đợi treo theo. Xem tasks/audit-he-thong-toi-uu-chuyen-sau.md §2.3 ý (a).
+    'crm_login_timeout' => [
+        'connect' => 5,  // giây — bắt tay TCP/TLS
+        'total' => 20,   // giây — trọn vòng đời request
+    ],
 ];

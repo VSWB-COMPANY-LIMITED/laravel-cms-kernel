@@ -11,6 +11,8 @@
 
 namespace Dev\Kernel\Traits;
 
+use Illuminate\Support\Facades\DB;
+
 trait FieldHelper
 {
     /**
@@ -20,10 +22,18 @@ trait FieldHelper
     {
         $string = '[{"id":1,"title":"Contact General Extra Fields","items":[{"id":3,"title":"Facebook Ads ID","slug":"provider_ad_id_ad_id","instructions":"Facebook Ads ID","type":"text","options":{"defaultValue":null,"defaultValueTextarea":null,"placeholderText":"Facebook Ads ID","wysiwygToolbar":null,"selectChoices":null,"buttonLabel":null,"rows":null},"items":[],"value":""},{"id":2,"title":"Facebook Ads Form ID","slug":"provider_form_id","instructions":"Facebook Ads Form ID","type":"text","options":{"defaultValue":null,"defaultValueTextarea":null,"placeholderText":"Facebook Ads Form ID","wysiwygToolbar":null,"selectChoices":null,"buttonLabel":null,"rows":null},"items":[],"value":""},{"id":1,"title":"Facebook Form Name","slug":"provider_form_name","instructions":"Facebook Ads Form Name","type":"text","options":{"defaultValue":null,"defaultValueTextarea":null,"placeholderText":"Facebook Ads Form Name","wysiwygToolbar":null,"selectChoices":null,"buttonLabel":null,"rows":null},"items":[],"value":""},{"id":4,"title":"Facebook Ads Group ID","slug":"provider_adgroup_idoup_id","instructions":"Facebook Ads Group ID","type":"text","options":{"defaultValue":null,"defaultValueTextarea":null,"placeholderText":"Facebook Ads Group ID","wysiwygToolbar":null,"selectChoices":null,"buttonLabel":null,"rows":null},"items":[],"value":""},{"id":5,"title":"Leadgen ID","slug":"leadgen_id","instructions":"Leadgen ID","type":"text","options":{"defaultValue":null,"defaultValueTextarea":null,"placeholderText":"Leadgen ID","wysiwygToolbar":null,"selectChoices":null,"buttonLabel":null,"rows":null},"items":[],"value":""},{"id":6,"title":"Consumer ID","slug":"connection_id","instructions":"Consumer ID","type":"text","options":{"defaultValue":null,"defaultValueTextarea":null,"placeholderText":"Consumer ID","wysiwygToolbar":null,"selectChoices":null,"buttonLabel":null,"rows":null},"items":[],"value":""}]}]';
         $rows = $this->parseRawData($string);
-        foreach ($rows as $row) {
-            $row['value'] = $data[$row['slug']]; // Set custom field's value
-            $this->saveCustomField(get_class($model), $model->id, $row);
-        }
+
+        // [29/10/2026] 6 field = 12 câu lệnh (1 SELECT + 1 INSERT/UPDATE mỗi field), autocommit
+        // ⇒ 12 lần InnoDB flush log mỗi lead. Bọc 1 transaction còn 1 lần commit, KHÔNG đổi field
+        // nào được đọc/ghi hay thứ tự — chỉ gộp biên giao dịch. Không chạm `$data[$row['slug']]`
+        // (xem tasks/kiem-thu-sau-trien-khai.md mục B4 — đổi truy cập key là quyết định nghiệp vụ
+        // riêng, chưa có đủ thông tin để sửa ở đây).
+        DB::transaction(function () use ($rows, $model, $data) {
+            foreach ($rows as $row) {
+                $row['value'] = $data[$row['slug']]; // Set custom field's value
+                $this->saveCustomField(get_class($model), $model->id, $row);
+            }
+        });
     }
 
     /**

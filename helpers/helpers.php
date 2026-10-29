@@ -1482,6 +1482,8 @@ if (!function_exists('apps_pull_login')) {
 
                 curl_setopt($curl, CURLOPT_URL, $url);
                 curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1); // RETURN THE CONTENTS OF THE CALL
+                curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, (int) config("kernel.kernel.general.crm_login_timeout.connect", 5));
+                curl_setopt($curl, CURLOPT_TIMEOUT, (int) config("kernel.kernel.general.crm_login_timeout.total", 20));
 
                 $result = curl_exec($curl);
 
@@ -1557,6 +1559,8 @@ if (!function_exists('apps_vtiger_login')) {
                     CURLOPT_SSL_VERIFYPEER => false,
                     CURLOPT_HEADER => false,
                     CURLOPT_FOLLOWLOCATION => false,
+                    CURLOPT_CONNECTTIMEOUT => (int) config('kernel.kernel.general.crm_login_timeout.connect', 5),
+                    CURLOPT_TIMEOUT => (int) config('kernel.kernel.general.crm_login_timeout.total', 20),
                 );
                 curl_setopt_array($curl, $options);
                 $challenge = curl_exec($curl);
@@ -1607,6 +1611,8 @@ if (!function_exists('apps_vtiger_login')) {
 
                     curl_setopt($curl, CURLOPT_URL, $url);
                     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1); // RETURN THE CONTENTS OF THE CALL
+                    curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, (int) config("kernel.kernel.general.crm_login_timeout.connect", 5));
+                    curl_setopt($curl, CURLOPT_TIMEOUT, (int) config("kernel.kernel.general.crm_login_timeout.total", 20));
 
                     $result = curl_exec($curl);
                     // apps_log($logger)->info($result);
@@ -1702,6 +1708,8 @@ if (!function_exists('apps_toyota_crm_login')) {
                 // curl_setopt($curl, CURLOPT_SSL_CIPHER_LIST, 'ecdhe_rsa_aes_128_gcm_sha_256');
                 curl_setopt($curl, CURLOPT_URL, $url);
                 curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1); // RETURN THE CONTENTS OF THE CALL
+                curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, (int) config("kernel.kernel.general.crm_login_timeout.connect", 5));
+                curl_setopt($curl, CURLOPT_TIMEOUT, (int) config("kernel.kernel.general.crm_login_timeout.total", 20));
                 $result = curl_exec($curl);
 
                 if (!curl_errno($curl)) {
@@ -1796,6 +1804,8 @@ if (!function_exists('apps_mmv_crm_login')) {
 
                 curl_setopt($curl, CURLOPT_URL, $url);
                 curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1); // RETURN THE CONTENTS OF THE CALL
+                curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, (int) config("kernel.kernel.general.crm_login_timeout.connect", 5));
+                curl_setopt($curl, CURLOPT_TIMEOUT, (int) config("kernel.kernel.general.crm_login_timeout.total", 20));
 
                 $result = curl_exec($curl);
 
@@ -1931,6 +1941,8 @@ if (!function_exists('apps_apollo_crm_login')) {
 
                 curl_setopt($curl, CURLOPT_URL, $url);
                 curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1); // RETURN THE CONTENTS OF THE CALL
+                curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, (int) config("kernel.kernel.general.crm_login_timeout.connect", 5));
+                curl_setopt($curl, CURLOPT_TIMEOUT, (int) config("kernel.kernel.general.crm_login_timeout.total", 20));
 
                 $result = curl_exec($curl);
 

@@ -28,6 +28,24 @@
   - gdrive-mirror-cli: `--path D:\x` (giá trị tách bằng dấu cách) bị coi `D:\x` là folder ID. Nay giữ đúng
     giá trị cho cờ có giá trị. Test `TestExtractFolderIDs_SpaceSeparatedFlagValue`. `dist/` đã build lại.
 
+- **[29/10/2026] Áp 2 đề xuất tối ưu rủi ro thấp từ `tasks/audit-he-thong-toi-uu-chuyen-sau.md`** (đã tự
+  kiểm chứng tại nguồn trước khi sửa, theo quy trình "BẮT BUỘC" đầu tài liệu đó). Các đề xuất còn lại
+  (giảm request Sheets, tách session khỏi route `api`, viết lại `apps_cache_*`) CHƯA áp — rủi ro/mức ảnh
+  hưởng tới luồng ghi Sheet và mọi request API cần xác nhận riêng trước khi làm trên code đang chạy thật.
+  - `FieldHelper::saveCustomFields`: 6 field × (1 SELECT + 1 INSERT/UPDATE), autocommit ⇒ 12 lần commit
+    mỗi lead. Nay bọc `DB::transaction()` ⇒ còn 1 lần commit. KHÔNG đổi field nào được đọc/ghi, KHÔNG đổi
+    `$data[$row['slug']]` (xem `tasks/kiem-thu-sau-trien-khai.md` mục B4 — đổi truy cập key là quyết định
+    nghiệp vụ riêng, ngoài phạm vi sửa này). Giới hạn kiểm chứng: `DB::transaction()` cần container
+    Laravel, bộ test của repo này (`tests/Unit`, PHPUnit thuần không có app) không dựng được — xác minh
+    thực tế qua `test:guards` + smoke test ở app tiêu thụ (`apis.pull.vn`) sau khi cập nhật composer.
+  - 5 hàm `apps_pull_login`/`apps_vtiger_login`/`apps_toyota_crm_login`/`apps_mmv_crm_login`/
+    `apps_apollo_crm_login` (6 lời gọi `curl_init()`, kể cả bước getchallenge riêng của vtiger): trước đây
+    KHÔNG hàm nào đặt `CURLOPT_CONNECTTIMEOUT`/`CURLOPT_TIMEOUT` ⇒ cURL mặc định chờ vô hạn, CRM đối tác
+    treo là worker hàng đợi treo theo (đúng mô tả sự cố "đơ máy chủ" ghi sẵn trong comment dòng 1458).
+    Nay thêm timeout qua `config('kernel.kernel.general.crm_login_timeout.{connect,total}')`, mặc định
+    5s/20s. KHÔNG cache token, KHÔNG đổi `apps_pull_login()` gọi vòng về chính app, KHÔNG đổi nhánh trả
+    lỗi — chỉ thêm trần thời gian (đúng bước "a" rủi ro thấp nhất trong 4 bước đề xuất của audit §2.3).
+
 - **[Google Sheets][🔴 khối ghi dữ liệu] Lỗi "cột nhảy": lead bị ghi lệch sang phải +8 cột mỗi lượt (khách Thaco, 22–27/10/2026) — gốc rễ đã ĐO, đã sửa bằng cách neo range `'Tab'!A:A`.**
 
   **1. Triệu chứng.**
