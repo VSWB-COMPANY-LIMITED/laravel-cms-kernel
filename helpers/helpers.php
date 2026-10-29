@@ -2374,14 +2374,44 @@ if (!function_exists('apps_cache_group_version')) {
      * (`{group}:v{N}:{key}`) — "xoá cả nhóm" chỉ là TĂNG số này lên 1, không cần biết/động tới bất
      * kỳ key thành viên nào. Entry cũ tự trôi theo TTL của chính nó, không ai phải dọn tay.
      *
-     * Mặc định KHÔNG tồn tại = phiên bản 0. `Cache::increment()` trên Redis (driver thật của app
-     * này — xem `.env` `CACHE_STORE`) tự khởi tạo key thiếu về 0 rồi +1 = 1, đúng tinh thần "chưa
-     * từng xoá nhóm thì version mặc định 0". Driver khác (file/array/database) cũng hỗ trợ
-     * `increment()` nhưng CHƯA kiểm — app này chỉ chạy Redis.
+     * 🔴 VÌ SAO KHỞI TẠO BẰNG `time()` CHỨ KHÔNG PHẢI 0 — chống "dữ liệu cũ SỐNG LẠI".
+     *
+     * Điểm yếu duy nhất của versioned-namespace: ta không còn xoá key thành viên, chỉ đổi con trỏ.
+     * Nếu khoá version BIẾN MẤT mà entry cũ CHƯA hết TTL, version quay về mốc khởi tạo và mọi key
+     * cũ lập tức được trỏ lại ⇒ phục vụ dữ liệu đã bị xoá về mặt logic. Đúng lớp sự cố 11/09/2026
+     * (webhook chọn nhầm kênh đã xoá). Khởi tạo bằng 0 thì mỗi lần mất khoá là một lần tua ngược.
+     *
+     * `time()` chỉ tiến, không lùi ⇒ mốc khởi tạo mới LUÔN lớn hơn mọi version đã phát trước đó
+     * (trừ khi đồng hồ máy bị chỉnh lùi hàng giờ — chấp nhận được). Mất khoá version giờ chỉ gây
+     * cache miss một lượt (vô hại, tự nạp lại), KHÔNG bao giờ gây sống lại dữ liệu cũ.
+     *
+     * Đã đo môi trường thật trước khi chọn: Redis `maxmemory-policy=volatile-lru` ⇒ khoá KHÔNG TTL
+     * (như khoá version này) không bị evict; RDB snapshot khôi phục nhất quán cả version lẫn dữ
+     * liệu. Nên xác suất mất khoá vốn đã thấp — `time()` là lưới đỡ cho trường hợp còn lại
+     * (đổi policy sang allkeys-lru, FLUSHDB, dựng Redis mới).
+     *
+     * Mỗi lần phải gieo lại mốc đều GHI LOG WARNING — đó là tín hiệu để theo dõi sự cố.
      */
     function apps_cache_group_version(string $groupSlug): int
     {
-        return (int) Cache::get('cachever:' . $groupSlug, 0);
+        $versionKey = 'cachever:' . $groupSlug;
+        $version = Cache::get($versionKey);
+
+        if ($version === null) {
+            // Chưa có (lần đầu của nhóm, hoặc khoá vừa mất) ⇒ gieo mốc THEO THỜI GIAN, không phải 0.
+            $version = time();
+            Cache::forever($versionKey, $version);
+
+            apps_log(apps_log_channel('app_cache'))->warning('[Cache] Gieo lại mốc phiên bản nhóm', [
+                'group' => $groupSlug,
+                'seeded_version' => $version,
+                'y_nghia' => 'Bình thường nếu đây là lần ĐẦU nhóm này được dùng (sau deploy/khởi động Redis mới). '
+                    . 'Nếu nhóm đã chạy ổn định mà dòng này xuất hiện ⇒ khoá version đã BIẾN MẤT, cần kiểm '
+                    . 'maxmemory-policy / FLUSHDB / sự cố Redis.',
+            ]);
+        }
+
+        return (int) $version;
     }
 }
 
@@ -2629,11 +2659,16 @@ if (!function_exists('apps_cache_flush')) {
                 // (Cache::increment()), không còn race đọc-kèm-ghi của thiết kế cũ.
                 $groupSlug = Str::slug($group);
 
-                Cache::increment('cachever:' . $groupSlug);
+                // Gọi apps_cache_group_version() TRƯỚC: nó bảo đảm khoá đã tồn tại (gieo mốc `time()`
+                // nếu thiếu). Không có bước này, `increment()` trên khoá thiếu trả về 1 — NHỎ HƠN mốc
+                // thời gian đã phát trước đó ⇒ tua ngược version ⇒ dữ liệu cũ sống lại.
+                $previousVersion = apps_cache_group_version($groupSlug);
+                $newVersion = Cache::increment('cachever:' . $groupSlug);
 
                 apps_log($logger)->info("Flushed group cache (version bump)", [
                     'group' => $group,
-                    'new_version' => apps_cache_group_version($groupSlug),
+                    'previous_version' => $previousVersion,
+                    'new_version' => $newVersion,
                     'caller' => $caller['method'] ?? 'unknown',
                     'file' => basename($caller['file'] ?? 'unknown') . ':' . ($caller['line'] ?? 0)
                 ]);
