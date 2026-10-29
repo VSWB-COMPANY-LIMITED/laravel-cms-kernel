@@ -2363,16 +2363,36 @@ if (!function_exists('apps_phone_extraction')) {
  *
  * Returns the key to use for storing in cache.
  */
+if (!function_exists('apps_cache_group_version')) {
+    /**
+     * [29/10/2026] Phiên bản hiện tại của một nhóm cache — nền tảng của versioned-namespace.
+     *
+     * Thay vì nhớ DANH SÁCH key thật trong nhóm (thiết kế cũ: đọc-kèm-ghi 5-6 round-trip mỗi lần
+     * đọc, không khoá ⇒ worker song song ghi đè nhau, và FIFO 100 key tự xoá dữ liệu CÒN HẠN khi
+     * nhóm vượt 100 key — xem tasks/audit-he-thong-toi-uu-chuyen-sau.md §2.5), mỗi nhóm chỉ giữ
+     * MỘT số nguyên "phiên bản". Key thật của mọi cache trong nhóm nhúng số này
+     * (`{group}:v{N}:{key}`) — "xoá cả nhóm" chỉ là TĂNG số này lên 1, không cần biết/động tới bất
+     * kỳ key thành viên nào. Entry cũ tự trôi theo TTL của chính nó, không ai phải dọn tay.
+     *
+     * Mặc định KHÔNG tồn tại = phiên bản 0. `Cache::increment()` trên Redis (driver thật của app
+     * này — xem `.env` `CACHE_STORE`) tự khởi tạo key thiếu về 0 rồi +1 = 1, đúng tinh thần "chưa
+     * từng xoá nhóm thì version mặc định 0". Driver khác (file/array/database) cũng hỗ trợ
+     * `increment()` nhưng CHƯA kiểm — app này chỉ chạy Redis.
+     */
+    function apps_cache_group_version(string $groupSlug): int
+    {
+        return (int) Cache::get('cachever:' . $groupSlug, 0);
+    }
+}
+
 if (!function_exists('apps_cache_get_key')) {
     /**
-     * Automatically create key in group list
-     * Save group in the list of keys for management and deletion
-     * Store max 100 keys per group to avoid redis or machine memory overload.
-     * When reaching limit, the first element (FIFO) will be deleted from cache and groupData.
+     * Tạo key thật để lưu/đọc cache, đăng ký TÊN nhóm (không đăng ký từng key) vào danh sách quản
+     * lý để `apps_cache_reset()` biết còn nhóm nào cần tăng version.
      *
      * @param string $cacheKey : Cache key in group, if not present then add queue to group's key list
      * @param string|null $group : Cache group name, contains group's common keys. if set to null then it's a separate cacheKey not in any group
-     * @return string Applied key with prefix (app:cacheKey)
+     * @return string Applied key with prefix (app:cacheKey), hoặc app:group:vN:cacheKey nếu có group
      */
     function apps_cache_get_key(string $cacheKey = 'default', string|null $group = null)
     {
@@ -2381,41 +2401,28 @@ if (!function_exists('apps_cache_get_key')) {
 
             // Prefix key by APP_NAME to separate between apps/DB
             $prefix = Str::slug(env('APP_NAME', 'app'));
-            $appliedKey = $prefix . ":" . $cacheKey;
 
-            // If no group, return key with app name prefix
+            // If no group, return key with app name prefix — KHÔNG đổi so với trước (không group
+            // thì không có khái niệm "xoá cả nhóm", không cần versioning).
             if (blank($group)) {
-                return $appliedKey;
+                return $prefix . ":" . $cacheKey;
             }
 
-            /**
-             * Add to data cache list of app
-             */
+            $groupSlug = Str::slug($group);
+
+            // Đăng ký TÊN nhóm (không phải từng key) vào danh sách quản lý — rẻ, không giới hạn
+            // 100, vì số NHÓM trong một app luôn nhỏ (khác hẳn số LEAD/KEY mỗi nhóm, thứ từng là
+            // nguồn phình của thiết kế cũ).
             $app_cache_key = md5("app_data_cache_list");
             $cache_list = Cache::has($app_cache_key) ? Cache::get($app_cache_key) : [];
-            $groupSlug = Str::slug($group);
-            $cache_list[$groupSlug] = true; // Save group name (slug) to app cache management list
-            Cache::forever($app_cache_key, $cache_list);
-
-            /* Get list of keys in group, use slug to avoid special characters */
-            $groupName = "group_" . $groupSlug;
-            $groupCacheKey = md5($groupName);
-            $groupData = json_decode(Cache::get($groupCacheKey, '[]'), true) ?: [];
-
-            /* Use FIFO queue to store data, limit max 100 keys */
-            /* When reaching limit, the first element will be deleted (FIFO - First In First Out) */
-            $MAX_ITEM = 100;
-            if (!in_array($appliedKey, $groupData)) {
-                if (count($groupData) >= $MAX_ITEM) {
-                    Cache::forget($groupData[0]); // Delete first element if reaching limit
-                    array_shift($groupData);
-                }
-                array_push($groupData, $appliedKey); // Add new element at end of array
-                Cache::forever($groupCacheKey, apps_json_encode($groupData));
+            if (!isset($cache_list[$groupSlug])) {
+                $cache_list[$groupSlug] = true;
+                Cache::forever($app_cache_key, $cache_list);
             }
 
-            /* Return key with app name prefix */
-            return $appliedKey;
+            $version = apps_cache_group_version($groupSlug);
+
+            return $prefix . ":" . $groupSlug . ":v" . $version . ":" . $cacheKey;
         } catch (\Throwable $th) {
             /* Log error if exception occurs */
             apps_log($logger)->error("Get data error at: " . $cacheKey . ", " . $group);
@@ -2458,39 +2465,11 @@ if (!function_exists('apps_cache_store')) {
         try {
             $logger = apps_log_channel("app_cache");
 
-            if ($isAppliedKey) {
-                // If appliedKey already exists, just store data
-                $cacheKey = $key;
-
-                // If group exists, still need to register appliedKey in groupData
-                if (!blank($group)) {
-                    $groupSlug = Str::slug($group);
-
-                    // Register group in app cache list
-                    $app_cache_key = md5("app_data_cache_list");
-                    $cache_list = Cache::has($app_cache_key) ? Cache::get($app_cache_key) : [];
-                    $cache_list[$groupSlug] = true;
-                    Cache::forever($app_cache_key, $cache_list);
-
-                    // Add appliedKey to groupData
-                    $groupName = "group_" . $groupSlug;
-                    $groupCacheKey = md5($groupName);
-                    $groupData = json_decode(Cache::get($groupCacheKey, '[]'), true) ?: [];
-
-                    if (!in_array($cacheKey, $groupData)) {
-                        $MAX_ITEM = 100;
-                        if (count($groupData) >= $MAX_ITEM) {
-                            Cache::forget($groupData[0]);
-                            array_shift($groupData);
-                        }
-                        array_push($groupData, $cacheKey);
-                        Cache::forever($groupCacheKey, apps_json_encode($groupData));
-                    }
-                }
-            } else {
-                // Old way: call apps_cache_get_key() to create key and register group
-                $cacheKey = apps_cache_get_key($key, $group);
-            }
+            // [29/10/2026] isAppliedKey=true: $key đã là kết quả của apps_cache_get_key() rồi —
+            // lời gọi đó đã đăng ký tên nhóm và nhúng sẵn version vào key. Không còn danh sách
+            // thành viên của nhóm để ghi thêm (versioned-namespace không cần nó), nên nhánh này
+            // chỉ còn mỗi việc ghi cache.
+            $cacheKey = $isAppliedKey ? $key : apps_cache_get_key($key, $group);
 
             Cache::put($cacheKey, $data, $time);
             return $cacheKey;
@@ -2624,52 +2603,17 @@ if (!function_exists('apps_cache_flush')) {
             $caller = apps_cache_get_caller_info();
 
             if (blank($group)) {
-                // If no group, delete cache by specific key
+                // If no group, delete cache by specific key — KHÔNG đổi so với trước. Versioned-
+                // namespace không có danh sách thành viên nhóm để dò-xoá nữa (xem nhánh dưới), nên
+                // phần quét-mọi-nhóm-tìm-key-này của thiết kế cũ không còn cần thiết.
                 if (blank($cacheKey)) {
                     apps_log($logger)->warning("Flush skipped: cacheKey is blank");
                     return;
                 }
 
-                // Calculate applied key with prefix to delete accurately
                 $appliedKey = $isAppliedKey ? $cacheKey : apps_cache_get_key($cacheKey, null);
 
-                // Delete cache
                 Cache::forget($appliedKey);
-
-                // IMPORTANT: Delete key from all groups that contain it to avoid memory leak
-                // and ensure groupData is in sync with actual cache
-                $app_cache_key = md5("app_data_cache_list");
-                $cache_list = Cache::has($app_cache_key) ? Cache::get($app_cache_key) : [];
-
-                foreach ($cache_list as $groupSlug => $flag) {
-                    $groupName = "group_" . $groupSlug;
-                    $groupCacheKey = md5($groupName);
-
-                    if (!Cache::has($groupCacheKey)) {
-                        continue;
-                    }
-
-                    $groupData = json_decode(Cache::get($groupCacheKey), true) ?? [];
-
-                    // Find and remove appliedKey from groupData
-                    $keyIndex = array_search($appliedKey, $groupData, true);
-                    if ($keyIndex !== false) {
-                        unset($groupData[$keyIndex]);
-                        $groupData = array_values($groupData); // Re-index array
-
-                        if (count($groupData) > 0) {
-                            Cache::forever($groupCacheKey, apps_json_encode($groupData));
-                        } else {
-                            // If group is empty, delete group cache key
-                            Cache::forget($groupCacheKey);
-                        }
-
-                        apps_log($logger)->debug("Removed key from group", [
-                            'applied_key' => $appliedKey,
-                            'group' => $groupSlug
-                        ]);
-                    }
-                }
 
                 apps_log($logger)->info("Flushed cached data", [
                     'original_key' => $cacheKey,
@@ -2678,43 +2622,18 @@ if (!function_exists('apps_cache_flush')) {
                     'file' => basename($caller['file'] ?? 'unknown') . ':' . ($caller['line'] ?? 0)
                 ]);
             } else {
-                // Delete all cache in group
+                // [29/10/2026] "Xoá cả nhóm" = TĂNG version của nhóm, KHÔNG xoá từng key thành
+                // viên. Mọi key cũ (nhúng version cũ trong tên) lập tức không còn được
+                // apps_cache_get_key()/apps_cache_get() trỏ tới nữa, và tự hết hạn theo TTL gốc
+                // của nó — không cần biết/liệt kê chúng là ai. O(1), atomic trên Redis
+                // (Cache::increment()), không còn race đọc-kèm-ghi của thiết kế cũ.
                 $groupSlug = Str::slug($group);
-                $groupCacheKey = md5("group_" . $groupSlug);
 
-                if (!Cache::has($groupCacheKey)) {
-                    // Group not yet created or already deleted - this is normal
-                    // Don't log to avoid spam when Observer is triggered multiple times
-                    // (example: bulk update ProviderForm will trigger Observer multiple times)
-                    return;
-                }
+                Cache::increment('cachever:' . $groupSlug);
 
-                apps_log($logger)->info("Flushing cached data with group: $group", [
+                apps_log($logger)->info("Flushed group cache (version bump)", [
                     'group' => $group,
-                    'caller' => $caller['method'] ?? 'unknown',
-                    'file' => basename($caller['file'] ?? 'unknown') . ':' . ($caller['line'] ?? 0)
-                ]);
-
-                $groupData = json_decode(Cache::get($groupCacheKey), true) ?? [];
-
-                if (blank($groupData) || count($groupData) === 0) {
-                    apps_log($logger)->debug("Group data is empty");
-                    Cache::forget($groupCacheKey); // Xóa group key ngay cả khi không có data
-                    return;
-                }
-
-                // Delete each cache key in group
-                foreach ($groupData as $appliedKey) {
-                    Cache::forget($appliedKey);
-                    apps_log($logger)->debug("Flushed cached data: $appliedKey");
-                }
-
-                // Delete group cache key after deleting all child cache
-                Cache::forget($groupCacheKey);
-                apps_log($logger)->info("Flushed group cache", [
-                    'group' => $group,
-                    'group_cache_key' => $groupCacheKey,
-                    'total_keys' => count($groupData),
+                    'new_version' => apps_cache_group_version($groupSlug),
                     'caller' => $caller['method'] ?? 'unknown',
                     'file' => basename($caller['file'] ?? 'unknown') . ':' . ($caller['line'] ?? 0)
                 ]);

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Changed
+- **[29/10/2026] `apps_cache_*` — chuyển sang versioned-namespace, bỏ danh sách thành viên nhóm (FIFO 100 key).**
+  Theo `tasks/audit-he-thong-toi-uu-chuyen-sau.md` §2.5 (user đồng ý áp đề xuất này).
+  - **Trước:** mỗi nhóm giữ một mảng tối đa 100 key thật (`Cache::get`/`Cache::forever` đọc-kèm-ghi, KHÔNG khoá).
+    Nhóm vượt 100 key ⇒ key CŨ NHẤT bị xoá dù còn hạn (tự xoá dữ liệu còn sống). `apps_cache_flush(key)`
+    đơn lẻ còn phải quét MỌI nhóm để dò-xoá key khỏi danh sách thành viên ⇒ O(số nhóm) round-trip.
+  - **Nay:** mỗi nhóm chỉ giữ MỘT số nguyên "version" (`cachever:<groupSlug>`, mặc định 0). Key thật nhúng
+    version (`{app}:{group}:v{N}:{key}`). Xoá cả nhóm = `Cache::increment()` — 1 lệnh, atomic (Redis — driver
+    thật của app này), không cần biết key nào đang tồn tại. Key cũ tự hết hạn theo TTL gốc, không ai dọn tay.
+    Xoá 1 key đơn lẻ (`apps_cache_flush($key)`, không group) không đổi — vẫn `Cache::forget()` trực tiếp.
+  - **Giữ nguyên chữ ký** `apps_cache_get/store/flush/reset()` — nơi gọi không phải đổi gì.
+  - Đổi định dạng khoá ⇒ **cache cũ coi như mất ở lần đầu deploy** (đọc theo khoá mới sẽ miss, tự nạp lại
+    bình thường qua TTL — không phải mất dữ liệu, chỉ mất cache tạm thời).
+  - **Giới hạn kiểm chứng tại kernel:** bộ test của repo này (`tests/Unit`, PHPUnit thuần không có Laravel
+    container) không dựng được `Cache`/`Redis` facade. Xác minh thật nằm ở app tiêu thụ
+    (`apis.pull.vn/dev/plugins/connection-core/tests/Feature/ConnectionListCacheInvalidationTest.php`) — test
+    đó trước đây dựng trực tiếp khoá nội bộ cũ (`md5('group_'.slug)`) nên phải viết lại để đi qua API công
+    khai (`apps_cache_get/store`) thay vì biết trước định dạng khoá — xem commit riêng ở repo app.
+
 ### Fixed
 - **[29/10/2026] Sửa các lỗi đã xác định chắc chắn qua audit** (`tasks/audit-he-thong-toi-uu-chuyen-sau.md`).
   Mỗi mục có kiểm tra trước/sau; lỗi chưa tường minh để agent của app tích hợp tự xử lý
