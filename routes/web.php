@@ -17,8 +17,4 @@ Route::group([
 ], function () {
     // Route::group(['prefix' => BaseHelper::getAdminPrefix(), 'middleware' => 'auth'], function () {
     // });
-
-    Route::get('test', [
-        'uses' => 'KernelController@test',
-    ]);
 });

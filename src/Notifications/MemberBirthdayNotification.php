@@ -44,7 +44,8 @@ class MemberBirthdayNotification extends Notification implements ShouldQueue
      */
     public function via($notifiable): array
     {
-        return ['mail'];
+        // Không có email thì không có gì để gửi; trước đây toMail() vẫn chạy và lỗi biến chưa định nghĩa.
+        return blank($notifiable->email ?? null) ? [] : ['mail'];
     }
 
     /**
@@ -87,7 +88,9 @@ class MemberBirthdayNotification extends Notification implements ShouldQueue
                 ->view(['html' => new HtmlString($emailHandler->getContent())])
                 ->subject($emailHandler->getSubject());
         } catch (\Throwable $th) {
-            dd($th->getMessage());
+            // dd() dừng hẳn tiến trình worker; ghi log rồi ném lại để queue đánh dấu job lỗi và thử lại.
+            apps_log('birthday-notification')->error(__METHOD__ . ': ' . $th->getMessage());
+            throw $th;
         }
     }
 }

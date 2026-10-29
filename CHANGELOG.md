@@ -3,6 +3,31 @@
 ## [Unreleased]
 
 ### Fixed
+- **[29/10/2026] Sửa các lỗi đã xác định chắc chắn qua audit** (`tasks/audit-he-thong-toi-uu-chuyen-sau.md`).
+  Mỗi mục có kiểm tra trước/sau; lỗi chưa tường minh để agent của app tích hợp tự xử lý
+  (`tasks/kiem-thu-sau-trien-khai.md`).
+  - `apps_phone_convert`: regex `[^0-9.]` giữ lại dấu chấm ⇒ `0982.311.866` không được chuẩn hoá. Nay `[^0-9]`.
+  - `apps_leadgen_prepare_data`: gán nhầm `$data['mau_xe_ma_ban_quan_tam']` (biến không tồn tại) ⇒ trường
+    này không bao giờ được chuẩn hoá. Nay `$lead[...]`, cùng giá trị chuẩn hoá với `model`/`dong_xe`.
+  - `MemberBirthdayNotification`: member không có email ⇒ `toMail()` lỗi biến chưa định nghĩa; `catch` gọi
+    `dd()` dừng tiến trình worker. Nay `via()` trả `[]` khi không có email; `catch` ghi log rồi ném lại.
+  - `Collection::whereCaseInsensitive`: `strtolower` không hạ chữ có dấu (`ĐÀ NẴNG` ≠ `đà nẵng`). Nay `mb_strtolower`.
+  - `routes/web.php`: gỡ `GET /test` — trỏ tới `KernelController@test` không tồn tại, luôn lỗi 500.
+  - Google Sheets: `apps_google_sheet_update_by_log()` để lại range trên instance `Sheets` dùng chung ⇒ lượt
+    đọc header kế tiếp đọc sai vùng. Nay dọn range trong `finally`, và đường đọc header dọn range trước `ranges()`.
+  - `env()` gọi lúc chạy trả null khi `config:cache` (log level, URL login pull/vtiger, Telegram). Thêm
+    `apps_env()`: đọc giá trị chụp sẵn ở `config('kernel.kernel.general.env.*')`, chưa có thì rơi về `env()`
+    như cũ — không đổi hành vi khi không cache config.
+  - Spread mảng key chuỗi (`...`) chỉ chạy từ PHP 8.1 (trả kết quả ghi Sheet, tuỳ chọn Telegram) ⇒ thay
+    `array_merge`, kết quả y hệt; trên PHP 8.0 trước đây ném lỗi SAU KHI dòng đã ghi (gây ghi trùng khi thử lại).
+  - `GDriveMirrorSync`: tên thư mục một cấp dài > 20 ký tự (vd "Marketing Materials 2026") bị nhận nhầm là
+    Drive ID. Nay `looksLikeDriveId()` chỉ nhận `[A-Za-z0-9_-]{21,}`. Test `GDriveDriveIdDetectionTest`.
+  - gdrive-mirror-cli: `--incremental` lấy start page token SAU khi liệt kê cây ⇒ thay đổi xảy ra trong lúc
+    liệt kê bị bỏ sót vĩnh viễn. Nay lấy TRƯỚC khi liệt kê. Test `TestRun_IncrementalTokenTakenBeforeListing`
+    (fail trên code cũ, pass trên code mới).
+  - gdrive-mirror-cli: `--path D:\x` (giá trị tách bằng dấu cách) bị coi `D:\x` là folder ID. Nay giữ đúng
+    giá trị cho cờ có giá trị. Test `TestExtractFolderIDs_SpaceSeparatedFlagValue`. `dist/` đã build lại.
+
 - **[Google Sheets][🔴 khối ghi dữ liệu] Lỗi "cột nhảy": lead bị ghi lệch sang phải +8 cột mỗi lượt (khách Thaco, 22–27/10/2026) — gốc rễ đã ĐO, đã sửa bằng cách neo range `'Tab'!A:A`.**
 
   **1. Triệu chứng.**

@@ -669,7 +669,7 @@ class GDriveMirrorSync extends Command
                 $currentDiskName = "gdrive_tmp_" . substr(md5((string) $identifier), 0, 8);
 
                 // Check if $identifier is an ID or a Path
-                $isId = (strpos((string) $identifier, '/') === false && strlen((string) $identifier) > 20);
+                $isId = self::looksLikeDriveId((string) $identifier);
 
                 if ($preloadedItems !== null) {
                     // Retry-failed: items already have full relative paths (incl. folder name).
@@ -1351,6 +1351,16 @@ class GDriveMirrorSync extends Command
      *
      * @return array{category: string, retryable: bool, reason: ?string}
      */
+    /**
+     * Tham số dòng lệnh là Drive ID hay đường dẫn. Drive ID chỉ gồm [A-Za-z0-9_-]; trước đây chỉ xét
+     * "không có '/' và dài > 20", nên tên thư mục một cấp dài (vd "Marketing Materials 2026") bị
+     * nhận nhầm là ID. Giữ ngưỡng > 20 ký tự như cũ.
+     */
+    public static function looksLikeDriveId(string $identifier): bool
+    {
+        return (bool) preg_match('/^[A-Za-z0-9_-]{21,}$/', $identifier);
+    }
+
     public static function classifyDriveError(string $msg): array
     {
         // L1-L3/C5 audit (2026-07-19): kiểm TRƯỚC MỌI THỨ KHÁC — lỗi TÊN (quá dài/EINVAL/bị
