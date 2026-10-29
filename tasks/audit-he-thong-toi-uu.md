@@ -157,7 +157,7 @@ Agent thực thi **bắt buộc** áp dụng đầy đủ quy trình **"BẮT BU
 24. **`src/Traits/LanguageAdvancedTrait.php`** — đánh dấu `@deprecated 5.9`, còn giữ cả `v1`
     (comment sẵn) lẫn `v2` song song — chưa rõ có nơi nào còn dùng.
 
-## 5. Vi phạm / lệch quy ước Botble đã debrand (theo skill `botble-conventions`)
+## 5. Vi phạm / lệch quy ước nền tảng đã de-brand
 
 25. **`database/migrations/2023_05_21_194154_sample.php` tạo bảng `licenses`** không có prefix
     `app_` theo quy ước bảng mới (§2 của skill). Có thể là chủ đích (bảng hạ tầng license, không

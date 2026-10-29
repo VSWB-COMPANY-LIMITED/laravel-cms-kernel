@@ -167,6 +167,19 @@ Kiểm chứng lại bằng cách tự đọc code. Các điểm sau trong lư�
 **Lợi ích ước lượng:** độ trễ ghi 1 lead giảm khoảng 40–50% (bớt 2 trên 4 round-trip mạng tới
 Google); quota read giảm 3 lần. Đo trước/sau bằng thời gian từng bước (mục 6).
 
+**Thêm — range rò rỉ vào đường đọc header (bổ sung 29/10/2026, phát hiện khi port sang v6):**
+- `apps_google_sheet_update_by_log()` đặt `->range($targetRange)` mà **không dọn**.
+- Đường đọc header (~dòng 757–765) gọi `->sheetById()->ranges()` mà không `range('')` trước. Nếu
+  cùng instance `Sheets` vừa chạy `update_by_log`, `ranges()` trả range rò rỉ (vd
+  `Raw!A2558:J2558`) ⇒ đọc header lỗi ⇒ rơi xuống cache/LKG, hoặc chặn ghi.
+- Lượt ghi thì an toàn, vì `eccf4b9` đã dọn range trước `append()`.
+- Mức ảnh hưởng tuỳ cách gói bind `Sheets`:
+  - gói 5.x/6.x bind `singleton` (✅ mã nguồn) ⇒ rò qua nhiều job;
+  - comment trong code nói gói mới bind `scoped` ⇒ chỉ rò trong cùng job. Cần kiểm trong `vendor/`
+    của app.
+- Bản port sang dòng v6 đã thêm `->range('')` trước `ranges()` ở đường đọc header. v7.x có thể làm
+  tương tự (1 dòng), hoặc dọn range cuối `update_by_log`.
+
 **Thêm (thấp):**
 - `apps_build_mapped_values()` ghi log `info` 3 dòng cho **mỗi mục mapping** (dòng 298, 315, 319)
   và log toàn bộ mảng `$mappings` 2 lần (dòng 290 và 829), log `$values_mappings` 2 lần (dòng 360
@@ -312,7 +325,7 @@ Hiện trạng (`helpers.php` ~2333–2729):
   ⇒ khoảng 12 câu lệnh còn 2–3.
 - Cấu hình field để thành hằng/`static` mảng PHP thay vì chuỗi JSON.
 - **Không** thêm unique index vào bảng custom field: bảng thuộc plugin vendor, không sửa (quy ước
-  Botble §1). Vì vậy dùng cách "đọc 1 lần + ghi phần thiếu" thay cho `upsert()`.
+  nền tảng §1). Vì vậy dùng cách "đọc 1 lần + ghi phần thiếu" thay cho `upsert()`.
 - Lưu ý: slug `provider_ad_id_ad_id`, `provider_adgroup_idoup_id` trông như gõ nhầm, và `id` không
   khớp thứ tự tiêu đề. Phải đối chiếu với dữ liệu thật trước khi động vào, vì sửa slug sẽ làm lệch
   bản ghi đã lưu.
