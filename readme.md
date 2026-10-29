@@ -10,7 +10,7 @@ A comprehensive kernel extension for Laravel CMS that provides core system funct
 
 <p align="center">
     <a href="https://packagist.org/packages/dev-extensions/kernel"><img src="https://img.shields.io/packagist/v/dev-extensions/kernel.svg?style=flat-square" alt="Latest Version"></a>
-    <a href="/LICENSE"><img src="https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square" alt="Software License"></a>
+    <img src="https://img.shields.io/badge/license-proprietary-red.svg?style=flat-square" alt="Software License">
     <a href="https://packagist.org/packages/dev-extensions/kernel"><img src="https://img.shields.io/packagist/dt/dev-extensions/kernel.svg?style=flat-square" alt="Total Downloads"></a>
 </p>
 
@@ -227,5 +227,7 @@ If you discover any security related issues, please email toan@visualweber.com i
 
 ## License
 
-The MIT License (MIT). Please see [License File](LICENSE) for more information.
+Proprietary. © 2026 Visual Weber Company Limited. All rights reserved. Proprietary software developed and distributed by Visual Weber. Use is permitted only under a valid license agreement.
+
+© 2026 Công ty TNHH Visual Weber. Bảo lưu mọi quyền. Phần mềm độc quyền của Visual Weber, chỉ được sử dụng theo Hợp đồng cấp phép.
 
