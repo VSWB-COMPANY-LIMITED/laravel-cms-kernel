@@ -2,7 +2,7 @@
   "name": "dev-extensions/kernel",
   "description": "dev-extensions kernel",
   "type": "library",
-  "license": "MIT",
+  "license": "proprietary",
   "autoload": {
     "psr-4": {
       "Dev\\Kernel\\": "src/"

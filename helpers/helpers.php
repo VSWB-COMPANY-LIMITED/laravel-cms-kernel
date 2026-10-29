@@ -2659,11 +2659,25 @@ if (!function_exists('apps_cache_flush')) {
                 // (Cache::increment()), không còn race đọc-kèm-ghi của thiết kế cũ.
                 $groupSlug = Str::slug($group);
 
-                // Gọi apps_cache_group_version() TRƯỚC: nó bảo đảm khoá đã tồn tại (gieo mốc `time()`
-                // nếu thiếu). Không có bước này, `increment()` trên khoá thiếu trả về 1 — NHỎ HƠN mốc
-                // thời gian đã phát trước đó ⇒ tua ngược version ⇒ dữ liệu cũ sống lại.
+                // [29/10/2026] GỘP hai bản vá độc lập cùng chạm khối này (hai agent, hai lỗi khác nhau):
+                //
+                // ① Gọi `apps_cache_group_version()` TRƯỚC khi tăng — nó bảo đảm khoá đã TỒN TẠI (gieo
+                //    mốc `time()` nếu thiếu). Không có bước này, `increment()` trên khoá vắng trả về 1,
+                //    NHỎ HƠN mốc thời gian từng phát ⇒ tua ngược version ⇒ dữ liệu cũ SỐNG LẠI.
+                // ② `Cache::increment()` trả `false` và KHÔNG tạo khoá trên DatabaseStore/MemcachedStore
+                //    (Redis/file/array thì tự khởi tạo) ⇒ lượt xoá nhóm âm thầm mất tác dụng.
+                //
+                // ① khiến ② gần như không còn xảy ra (tới lượt tăng thì khoá luôn có sẵn), nhưng VẪN giữ
+                // nhánh phòng của ②: giữa lúc gieo và lúc tăng, tiến trình khác có thể xoá khoá, và trên
+                // driver không tự khởi tạo thì lượt xoá đó sẽ im lặng trôi qua.
                 $previousVersion = apps_cache_group_version($groupSlug);
+
                 $newVersion = Cache::increment('cachever:' . $groupSlug);
+
+                if ($newVersion === false) {
+                    $newVersion = $previousVersion + 1;
+                    Cache::forever('cachever:' . $groupSlug, $newVersion);
+                }
 
                 apps_log($logger)->info("Flushed group cache (version bump)", [
                     'group' => $group,

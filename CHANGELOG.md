@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Fixed
+- **[29/10/2026] 🔴 `apps_cache_*`: dữ liệu đã xoá SỐNG LẠI khi khoá phiên bản nhóm biến mất.**
+  Versioned-namespace không xoá key thành viên, chỉ đổi con trỏ. Mốc khởi tạo là `0` ⇒ nếu khoá
+  `cachever:<nhóm>` mất (FLUSHDB, đổi `maxmemory-policy` sang `allkeys-lru` rồi evict, dựng Redis mới)
+  mà entry cũ CHƯA hết TTL, version quay về 0 và mọi key cũ được trỏ lại ⇒ phục vụ dữ liệu đã xoá về
+  mặt logic. Đúng lớp sự cố 11/09/2026 (webhook chọn nhầm kênh đã xoá mềm).
+  **Đã tái hiện**: test dựng kịch bản mất khoá, giá trị `kenh-da-xoa` QUAY VỀ trên code trước khi vá.
+  Nay gieo mốc bằng `time()` — thời gian chỉ tiến nên mốc gieo lại LUÔN lớn hơn mọi version đã phát
+  ⇒ mất khoá chỉ gây miss một lượt, không bao giờ sống lại dữ liệu. Mỗi lần gieo lại ghi log WARNING
+  kèm diễn giải (bình thường khi nhóm chạy lần đầu; là sự cố nếu nhóm đã chạy ổn định) để theo dõi.
+  Đã đo môi trường thật trước khi chọn: Redis `maxmemory-policy=volatile-lru` (khoá không TTL như khoá
+  version KHÔNG bị evict) + `appendonly=no`/RDB (khôi phục nhất quán cả version lẫn dữ liệu) ⇒ xác suất
+  thấp; `time()` là lưới đỡ cho các đường còn lại.
+  Test: `AppsCacheVersionedNamespaceTest` (6 ca, ở repo app `dev/plugins/connection-core`) — 2 ĐỎ trước vá.
+- **[29/10/2026] `apps_cache_flush(null, $group)` không có tác dụng trên driver database/memcached.**
+  Xoá nhóm = `Cache::increment('cachever:<nhóm>')`, nhưng `DatabaseStore`/`MemcachedStore` trả `false`
+  và KHÔNG tạo key khi key chưa tồn tại ⇒ version luôn là 0, mọi lần xoá nhóm đều vô hiệu, dữ liệu cũ
+  được trả ra tới hết TTL. Nay `increment` trả `false` thì ghi `version + 1`. Redis/file/array không đổi.
+  Kiểm bằng script giả lập 2 kiểu driver: FAIL trên code trước, OK sau khi sửa.
+
 ### Changed
 - **[29/10/2026] `apps_cache_*` — chuyển sang versioned-namespace, bỏ danh sách thành viên nhóm (FIFO 100 key).**
   Theo `tasks/audit-he-thong-toi-uu-chuyen-sau.md` §2.5 (user đồng ý áp đề xuất này).
