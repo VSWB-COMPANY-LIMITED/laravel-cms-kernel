@@ -2402,6 +2402,26 @@ if (!function_exists('apps_cache_group_version')) {
      * vốn đã thấp — nhãn duy nhất là lưới đỡ cho phần còn lại (allkeys-lru, FLUSHDB, Redis dựng mới).
      *
      * Mỗi lần phải gieo lại nhãn đều GHI LOG WARNING — đó là tín hiệu để theo dõi sự cố.
+     *
+     * ──────────────────────────────────────────────────────────────────────────────────────────
+     * VÌ SAO DÙNG `Cache::forever()` MÀ KHÔNG PHẢI `Cache::add()` — đã cân nhắc, đừng đổi lại.
+     *
+     * Hai tiến trình cùng thấy nhãn trống có thể cùng gieo, bên ghi sau đè lên bên trước. Gợi ý
+     * thường gặp là thay bằng `Cache::add()` (chỉ ghi khi chưa có). Đã đọc
+     * `Illuminate\Cache\Repository::add()`: nó CHỈ atomic khi truyền TTL (mới gọi xuống
+     * `$store->add()` ⇒ Redis `SETNX`); không TTL thì rơi về `get()`-rồi-`put()`, VẪN đua.
+     *
+     * Mà đặt TTL cho nhãn lại đổi một rủi ro lành lấy một rủi ro nặng hơn: khoá có TTL thì
+     * `volatile-lru` ĐƯỢC PHÉP evict nó. Mất nhãn lúc Redis đang chịu áp lực bộ nhớ ⇒ cả nhóm
+     * invalidate một lúc ⇒ dồn tải xuống DB đúng lúc hệ thống đang yếu.
+     *
+     * Và cuộc đua kia THỰC SỰ VÔ HẠI với nhãn duy nhất: mọi nhãn gieo ra đều khác nhau và đều
+     * khác nhãn cũ, nên dù bên nào thắng, dữ liệu trước khi xoá vẫn KHÔNG thể bị trỏ lại. Hậu quả
+     * duy nhất là thêm một lượt cache miss. (Với thiết kế ĐẾM TĂNG trước đây thì cuộc đua này
+     * nguy hiểm thật — bên ghi sau có thể hạ số xuống ⇒ dữ liệu cũ sống lại. Nhãn duy nhất khiến
+     * cả lớp vấn đề đó biến mất.)
+     *
+     * ⇒ Giữ `forever()`: không evict được, và đổi lại chỉ là một lượt miss hiếm gặp.
      */
     function apps_cache_group_version(string $groupSlug): string
     {
@@ -2696,7 +2716,11 @@ if (!function_exists('apps_cache_flush')) {
                 // đếm tăng làm dữ liệu cũ SỐNG LẠI khi khoá nhãn bị mất.
                 $groupSlug = Str::slug($group);
 
-                $previousVersion = apps_cache_group_version($groupSlug);
+                // Đọc nhãn cũ CHỈ để ghi log — cố ý KHÔNG gọi apps_cache_group_version() ở đây:
+                // hàm đó sẽ gieo nhãn nếu thiếu, mà ngay dòng dưới ta đã ghi đè bằng nhãn mới ⇒ thừa
+                // một lượt ghi, và còn đẻ ra dòng WARNING "gieo lại nhãn" sai ngữ cảnh khi xoá một
+                // nhóm chưa từng được dùng.
+                $previousVersion = (string) Cache::get('cachever:' . $groupSlug, '');
                 $newVersion = apps_cache_new_group_version();
 
                 Cache::forever('cachever:' . $groupSlug, $newVersion);

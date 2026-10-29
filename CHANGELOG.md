@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Removed
+- **[29/10/2026] Xoá 2 test chết `tests/Unit/AppsGsheetWriteTest.php` và `AppsGsheetAppendSucceededTest.php`** —
+  `vendor/bin/phpunit` fatal vì chúng gọi 5 hàm không còn tồn tại (`apps_gsheet_order_row`,
+  `apps_gsheet_update_succeeded`, `apps_gsheet_is_grid_limit_error`, `apps_gsheet_is_transient_error`,
+  `apps_gsheet_append_succeeded`). Đã kiểm tại nguồn: cả 5 đều **0 định nghĩa** trong toàn repo, bị gỡ
+  bởi chuỗi revert `77ce80d`/`cdfc07f`.
+  🔴 **KHÔNG viết test thay cho 5 hàm này.** Chúng bị gỡ **CÓ CHỦ ĐÍCH**: chủ sản phẩm chốt 27/09/2026
+  giữ `append()` trần và **chấp nhận lỗi Filter/ẩn**, xử lý bằng cách dặn khách — xem khối cảnh báo
+  "🔴🔴 ĐỪNG SỬA KHỐI GHI NÀY" trong `apps_google_sheet()`. Viết lại test cho chúng là vô tình dựng lại
+  áp lực khôi phục một cơ chế đã trả giá để gỡ bỏ.
+  Logic gsheet thuần **đang tồn tại** vẫn được phủ đủ bởi `AppsGsheetAppendRangeTest`
+  (`apps_gsheet_append_range` + `apps_gsheet_range_starts_at_column_a`); `apps_gsheet_header_row()` cần
+  Google API thật nên không unit-test được. Kết quả: `vendor/bin/phpunit` **144/144 xanh**.
+
 ### Fixed
 - **[29/10/2026] 🔴 `apps_cache_*`: dữ liệu đã xoá SỐNG LẠI khi khoá phiên bản nhóm biến mất.**
   Versioned-namespace không xoá key thành viên, chỉ đổi con trỏ. Mốc khởi tạo là `0` ⇒ nếu khoá
