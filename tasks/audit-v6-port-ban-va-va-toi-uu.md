@@ -59,6 +59,25 @@ không được sửa mục đó:
 
 ---
 
+## Cập nhật 29/10/2026 — các lỗi đã xác định chắc chắn ĐÃ SỬA
+
+Người dùng cho phép sửa mọi lỗi **xác định chắc chắn** trên mọi phiên bản; lỗi chưa tường minh để agent
+của app tích hợp tự xử lý.
+
+**Đã sửa trên cả 3 nhánh v6 (không merge):**
+- spread mảng key chuỗi → `array_merge` (mục 2.1, có thể gây ghi trùng dòng trên PHP 7.4/8.0);
+- gỡ nhóm route `api/v1/test/*` (mục 2.2) và `GET /test` gửi Telegram (mục 2.3);
+- `update_by_log` dọn range;
+- `apps_phone_convert` bỏ dấu chấm;
+- notification sinh nhật: thiếu email, `dd()`;
+- `whereCaseInsensitive` dùng `mb_strtolower`;
+- `env()` lúc chạy → `apps_env()`.
+
+Cùng các lỗi tương ứng cũng đã sửa trên v7.x.
+
+**Kiểm thử còn treo** (PHP 7.4 thật, ghi Sheet thật, đo hiệu năng trên nền v6) và **danh sách lỗi chưa
+sửa**: `tasks/kiem-thu-sau-trien-khai.md`.
+
 ## 0. Bối cảnh 3 nhánh v6
 
 | Nhánh | Namespace | Khác biệt |
