@@ -9,9 +9,18 @@
   mà entry cũ CHƯA hết TTL, version quay về 0 và mọi key cũ được trỏ lại ⇒ phục vụ dữ liệu đã xoá về
   mặt logic. Đúng lớp sự cố 11/09/2026 (webhook chọn nhầm kênh đã xoá mềm).
   **Đã tái hiện**: test dựng kịch bản mất khoá, giá trị `kenh-da-xoa` QUAY VỀ trên code trước khi vá.
-  Nay gieo mốc bằng `time()` — thời gian chỉ tiến nên mốc gieo lại LUÔN lớn hơn mọi version đã phát
-  ⇒ mất khoá chỉ gây miss một lượt, không bao giờ sống lại dữ liệu. Mỗi lần gieo lại ghi log WARNING
-  kèm diễn giải (bình thường khi nhóm chạy lần đầu; là sự cố nếu nhóm đã chạy ổn định) để theo dõi.
+  Nay nhãn phiên bản là **chuỗi DUY NHẤT** `time()-<random>` thay vì số đếm tăng dần; "xoá nhóm" =
+  đổi sang một nhãn chưa từng dùng.
+  ⚠️ **Hai cách gieo đã thử và đều HỎNG, đừng quay lại**: (a) gieo `0` + đếm tăng — mất khoá là tua
+  về 0, trùng ngay nhãn đầu; (b) gieo `time()` + đếm tăng — mất khoá trong CÙNG GIÂY ra đúng con số
+  cũ, và nhóm bị xoá hơn 1 lần/giây thì bộ đếm vượt mặt đồng hồ nên mốc gieo lại rơi vào khoảng số
+  ĐÃ DÙNG. Bản (b) từng được commit và test bắt được ngay. Nhãn không cần tăng dần — chỉ cần chưa
+  từng dùng.
+  Lợi ích phụ: nhãn ghi bằng `Cache::forever()` chạy đúng trên MỌI driver ⇒ lớp lỗi "xoá nhóm vô
+  hiệu trên database/memcached" (vá riêng ở `5d1dde2`) biến mất tận gốc, không cần nhánh phòng cho
+  `Cache::increment()` nữa. Ý đồ bản vá đó được giữ nguyên, chỉ đạt theo cách khác.
+  Mỗi lần gieo lại nhãn ghi log WARNING kèm diễn giải (bình thường khi nhóm chạy lần đầu; là sự cố
+  nếu nhóm đã chạy ổn định) để theo dõi vài ngày.
   Đã đo môi trường thật trước khi chọn: Redis `maxmemory-policy=volatile-lru` (khoá không TTL như khoá
   version KHÔNG bị evict) + `appendonly=no`/RDB (khôi phục nhất quán cả version lẫn dữ liệu) ⇒ xác suất
   thấp; `time()` là lưới đỡ cho các đường còn lại.

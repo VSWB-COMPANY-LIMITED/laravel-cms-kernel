@@ -2374,44 +2374,70 @@ if (!function_exists('apps_cache_group_version')) {
      * (`{group}:v{N}:{key}`) — "xoá cả nhóm" chỉ là TĂNG số này lên 1, không cần biết/động tới bất
      * kỳ key thành viên nào. Entry cũ tự trôi theo TTL của chính nó, không ai phải dọn tay.
      *
-     * 🔴 VÌ SAO KHỞI TẠO BẰNG `time()` CHỨ KHÔNG PHẢI 0 — chống "dữ liệu cũ SỐNG LẠI".
+     * 🔴 VÌ SAO NHÃN PHẢI **DUY NHẤT**, KHÔNG PHẢI **TĂNG DẦN** — chống "dữ liệu cũ SỐNG LẠI".
      *
      * Điểm yếu duy nhất của versioned-namespace: ta không còn xoá key thành viên, chỉ đổi con trỏ.
-     * Nếu khoá version BIẾN MẤT mà entry cũ CHƯA hết TTL, version quay về mốc khởi tạo và mọi key
-     * cũ lập tức được trỏ lại ⇒ phục vụ dữ liệu đã bị xoá về mặt logic. Đúng lớp sự cố 11/09/2026
-     * (webhook chọn nhầm kênh đã xoá). Khởi tạo bằng 0 thì mỗi lần mất khoá là một lần tua ngược.
+     * Nếu khoá nhãn BIẾN MẤT mà entry cũ CHƯA hết TTL, nhãn được gieo lại — và nếu nhãn mới TRÙNG
+     * một nhãn đã dùng, mọi key cũ lập tức được trỏ lại ⇒ phục vụ dữ liệu đã xoá về mặt logic.
+     * Đúng lớp sự cố 11/09/2026 (webhook chọn nhầm kênh đã xoá).
      *
-     * `time()` chỉ tiến, không lùi ⇒ mốc khởi tạo mới LUÔN lớn hơn mọi version đã phát trước đó
-     * (trừ khi đồng hồ máy bị chỉnh lùi hàng giờ — chấp nhận được). Mất khoá version giờ chỉ gây
-     * cache miss một lượt (vô hại, tự nạp lại), KHÔNG bao giờ gây sống lại dữ liệu cũ.
+     * Hai cách gieo ĐỀU TỪNG THỬ VÀ ĐỀU HỎNG, nên đừng quay lại:
+     *   - Gieo `0` + đếm tăng: mất khoá là tua về 0 ⇒ trùng ngay nhãn đầu tiên.
+     *   - Gieo `time()` + đếm tăng: mất khoá trong CÙNG GIÂY với lượt gieo trước ⇒ ra đúng con số
+     *     cũ. Tệ hơn: nhóm bị xoá nhiều hơn 1 lần/giây thì bộ đếm vượt mặt đồng hồ, nên mốc gieo
+     *     lại rơi vào khoảng số ĐÃ DÙNG. Test `test_mat_khoa_phien_ban_khong_lam_du_lieu_cu_song_lai`
+     *     bắt được đúng ca này.
      *
-     * Đã đo môi trường thật trước khi chọn: Redis `maxmemory-policy=volatile-lru` ⇒ khoá KHÔNG TTL
-     * (như khoá version này) không bị evict; RDB snapshot khôi phục nhất quán cả version lẫn dữ
-     * liệu. Nên xác suất mất khoá vốn đã thấp — `time()` là lưới đỡ cho trường hợp còn lại
-     * (đổi policy sang allkeys-lru, FLUSHDB, dựng Redis mới).
+     * ⇒ Nhãn KHÔNG cần tăng dần, nó chỉ cần **chưa từng được dùng**. Nay nhãn = `time()` (để đọc log
+     * còn biết mốc) ghép chuỗi ngẫu nhiên (để không bao giờ trùng namespace cũ). Mất khoá giờ chỉ
+     * gây cache miss một lượt — vô hại, tự nạp lại — chứ không bao giờ làm sống lại dữ liệu.
      *
-     * Mỗi lần phải gieo lại mốc đều GHI LOG WARNING — đó là tín hiệu để theo dõi sự cố.
+     * Lợi ích phụ: ghi nhãn bằng `Cache::forever()` chạy đúng trên MỌI driver. Bản trước dùng
+     * `Cache::increment()`, mà `DatabaseStore`/`MemcachedStore` trả `false` và không tạo khoá khi
+     * khoá chưa tồn tại ⇒ lượt xoá nhóm âm thầm vô hiệu (lỗi đã được vá riêng ở 5d1dde2). Cách này
+     * làm cả lớp lỗi đó biến mất tận gốc, nên nhánh phòng cho `increment()` không còn cần nữa.
+     *
+     * Đã đo môi trường thật: Redis `maxmemory-policy=volatile-lru` ⇒ khoá KHÔNG TTL (như khoá nhãn
+     * này) không bị evict; RDB snapshot khôi phục nhất quán cả nhãn lẫn dữ liệu. Xác suất mất khoá
+     * vốn đã thấp — nhãn duy nhất là lưới đỡ cho phần còn lại (allkeys-lru, FLUSHDB, Redis dựng mới).
+     *
+     * Mỗi lần phải gieo lại nhãn đều GHI LOG WARNING — đó là tín hiệu để theo dõi sự cố.
      */
-    function apps_cache_group_version(string $groupSlug): int
+    function apps_cache_group_version(string $groupSlug): string
     {
         $versionKey = 'cachever:' . $groupSlug;
         $version = Cache::get($versionKey);
 
-        if ($version === null) {
-            // Chưa có (lần đầu của nhóm, hoặc khoá vừa mất) ⇒ gieo mốc THEO THỜI GIAN, không phải 0.
-            $version = time();
+        if (blank($version)) {
+            // Chưa có: lần đầu của nhóm, HOẶC khoá vừa biến mất.
+            $version = apps_cache_new_group_version();
             Cache::forever($versionKey, $version);
 
-            apps_log(apps_log_channel('app_cache'))->warning('[Cache] Gieo lại mốc phiên bản nhóm', [
+            apps_log(apps_log_channel('app_cache'))->warning('[Cache] Gieo lại nhãn phiên bản nhóm', [
                 'group' => $groupSlug,
                 'seeded_version' => $version,
                 'y_nghia' => 'Bình thường nếu đây là lần ĐẦU nhóm này được dùng (sau deploy/khởi động Redis mới). '
-                    . 'Nếu nhóm đã chạy ổn định mà dòng này xuất hiện ⇒ khoá version đã BIẾN MẤT, cần kiểm '
+                    . 'Nếu nhóm đã chạy ổn định mà dòng này xuất hiện ⇒ khoá nhãn đã BIẾN MẤT, cần kiểm '
                     . 'maxmemory-policy / FLUSHDB / sự cố Redis.',
             ]);
         }
 
-        return (int) $version;
+        return (string) $version;
+    }
+}
+
+if (!function_exists('apps_cache_new_group_version')) {
+    /**
+     * [29/10/2026] Sinh một nhãn phiên bản nhóm CHƯA TỪNG ĐƯỢC DÙNG.
+     *
+     * `time()` đứng trước để đọc log/khoá Redis còn biết nhóm được xoá lúc nào; chuỗi ngẫu nhiên
+     * phía sau mới là thứ bảo đảm không trùng namespace cũ (kể cả khi hai lượt rơi vào cùng một
+     * giây, hoặc khi khoá nhãn vừa bị mất rồi gieo lại). Xem giải thích đầy đủ ở
+     * `apps_cache_group_version()`.
+     */
+    function apps_cache_new_group_version(): string
+    {
+        return time() . '-' . Str::random(10);
     }
 }
 
@@ -2652,32 +2678,28 @@ if (!function_exists('apps_cache_flush')) {
                     'file' => basename($caller['file'] ?? 'unknown') . ':' . ($caller['line'] ?? 0)
                 ]);
             } else {
-                // [29/10/2026] "Xoá cả nhóm" = TĂNG version của nhóm, KHÔNG xoá từng key thành
-                // viên. Mọi key cũ (nhúng version cũ trong tên) lập tức không còn được
-                // apps_cache_get_key()/apps_cache_get() trỏ tới nữa, và tự hết hạn theo TTL gốc
-                // của nó — không cần biết/liệt kê chúng là ai. O(1), atomic trên Redis
-                // (Cache::increment()), không còn race đọc-kèm-ghi của thiết kế cũ.
+                // [29/10/2026] "Xoá cả nhóm" = ĐỔI NHÃN phiên bản của nhóm sang một nhãn CHƯA TỪNG
+                // DÙNG, KHÔNG xoá từng key thành viên. Mọi key cũ (nhúng nhãn cũ trong tên) lập tức
+                // không còn được apps_cache_get_key()/apps_cache_get() trỏ tới, và tự hết hạn theo
+                // TTL gốc của nó — không cần biết/liệt kê chúng là ai. O(1), không còn vòng
+                // đọc-kèm-ghi và race của thiết kế cũ.
+                //
+                // ⚠️ GHI CHÚ CHO AGENT KHÁC — vì sao khối này không còn `Cache::increment()`:
+                // bản 5d1dde2 (agent khác) đã vá đúng một lỗi THẬT: `increment()` trả `false` và
+                // KHÔNG tạo khoá trên DatabaseStore/MemcachedStore ⇒ lượt xoá nhóm âm thầm vô hiệu.
+                // Nay nhãn được ghi bằng `Cache::forever()` — chạy đúng trên MỌI driver — nên cả lớp
+                // lỗi đó biến mất tận gốc và nhánh phòng cho `increment()` không còn việc để làm.
+                // Ý đồ của bản vá đó được GIỮ NGUYÊN (xoá nhóm phải có tác dụng ở mọi driver), chỉ
+                // là đạt được theo cách không cần tới increment nữa.
+                //
+                // Lý do đổi từ "đếm tăng" sang "nhãn duy nhất": xem apps_cache_group_version() —
+                // đếm tăng làm dữ liệu cũ SỐNG LẠI khi khoá nhãn bị mất.
                 $groupSlug = Str::slug($group);
 
-                // [29/10/2026] GỘP hai bản vá độc lập cùng chạm khối này (hai agent, hai lỗi khác nhau):
-                //
-                // ① Gọi `apps_cache_group_version()` TRƯỚC khi tăng — nó bảo đảm khoá đã TỒN TẠI (gieo
-                //    mốc `time()` nếu thiếu). Không có bước này, `increment()` trên khoá vắng trả về 1,
-                //    NHỎ HƠN mốc thời gian từng phát ⇒ tua ngược version ⇒ dữ liệu cũ SỐNG LẠI.
-                // ② `Cache::increment()` trả `false` và KHÔNG tạo khoá trên DatabaseStore/MemcachedStore
-                //    (Redis/file/array thì tự khởi tạo) ⇒ lượt xoá nhóm âm thầm mất tác dụng.
-                //
-                // ① khiến ② gần như không còn xảy ra (tới lượt tăng thì khoá luôn có sẵn), nhưng VẪN giữ
-                // nhánh phòng của ②: giữa lúc gieo và lúc tăng, tiến trình khác có thể xoá khoá, và trên
-                // driver không tự khởi tạo thì lượt xoá đó sẽ im lặng trôi qua.
                 $previousVersion = apps_cache_group_version($groupSlug);
+                $newVersion = apps_cache_new_group_version();
 
-                $newVersion = Cache::increment('cachever:' . $groupSlug);
-
-                if ($newVersion === false) {
-                    $newVersion = $previousVersion + 1;
-                    Cache::forever('cachever:' . $groupSlug, $newVersion);
-                }
+                Cache::forever('cachever:' . $groupSlug, $newVersion);
 
                 apps_log($logger)->info("Flushed group cache (version bump)", [
                     'group' => $group,
