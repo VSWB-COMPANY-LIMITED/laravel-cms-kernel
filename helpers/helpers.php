@@ -2286,9 +2286,38 @@ if (!function_exists('apps_telegram_send_message')) {
 
             $botToken = config("telegram.bots.{$channel}.token", apps_env('TELEGRAM_BOT_TOKEN'));
             $telegram = new \Telegram\Bot\Api($botToken); // getenv TELEGRAM_BOT_TOKEN, it's working
-            return $telegram->sendMessage($telegramDfOptions);
+
+            $sent = $telegram->sendMessage($telegramDfOptions);
+
+            // 🔴 [30/10/2026] GHI BẰNG CHỨNG ĐÃ GỬI — thiếu dòng này thì không điều tra được gì.
+            //
+            // Trước đây hàm `return` thẳng kết quả mà không ghi lại. Cái giá đã trả thật đêm
+            // 29→30/10: chủ sản phẩm báo "lead không thấy thông báo", mà log chỉ có
+            // `TelegramSubJob is running` rồi im — không cách nào phân biệt "đã gửi, người xem tìm
+            // sót" với "gửi hỏng". Kết quả: mất một tiếng điều tra và ra KẾT LUẬN SAI (tin thật ra
+            // đã tới, nằm ở nhóm Telegram khác). `message_id` do Telegram cấp là thứ DUY NHẤT
+            // chứng minh tin đã nằm trên server của họ.
+            //
+            // CHỈ ghi khoá định danh, KHÔNG ghi lại nội dung: dòng `telegramDfOptions` phía trên đã
+            // chở nguyên văn tin (kèm tên + số điện thoại khách) vào log rồi — đừng nhân đôi PII.
+            //
+            // Bọc try/catch + nullsafe: đây là dòng CHẨN ĐOÁN, tuyệt đối không được làm hỏng một
+            // lượt gửi ĐÃ THÀNH CÔNG. Đúng bài học `apps_cache_group_version()` cùng đợt này —
+            // thêm log vào đường chạy nóng đã làm chết 3 ca test leadgen.
+            try {
+                apps_log($logger)?->info('[Telegram::Sent]', [
+                    'message_id' => data_get($sent, 'message_id'),
+                    'chat_id' => data_get($sent, 'chat.id') ?? ($telegramDfOptions['chat_id'] ?? null),
+                    'message_thread_id' => $telegramDfOptions['message_thread_id'] ?? null,
+                    'channel' => $channel,
+                ]);
+            } catch (Throwable $ignored) {
+                // Không có logger dùng được ⇒ bỏ dòng chẩn đoán, KHÔNG đụng tới kết quả gửi.
+            }
+
+            return $sent;
         } catch (Throwable $th) {
-            apps_log($logger)->error(__FUNCTION__, (array) $th->getMessage());
+            apps_log($logger)?->error(__FUNCTION__, (array) $th->getMessage());
             // DO NOT THROW
             return null;
         }

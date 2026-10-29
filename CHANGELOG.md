@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+- **[30/10/2026] `apps_telegram_send_message()` ghi `[Telegram::Sent]` kèm `message_id`.**
+  Trước đây hàm `return` thẳng kết quả mà không ghi gì ⇒ **không có bằng chứng tin đã gửi ở bất kỳ
+  đâu**. Cái giá đã trả thật đêm 29→30/10: chủ sản phẩm báo "lead không thấy thông báo", log chỉ có
+  `TelegramSubJob is running` rồi im — không phân biệt được "đã gửi, người xem tìm sót" với "gửi
+  hỏng"; mất một tiếng điều tra và ra kết luận SAI (tin đã tới, nằm ở nhóm Telegram khác).
+  Nay ghi `message_id` (Telegram cấp — thứ duy nhất chứng minh tin nằm trên server của họ), `chat_id`,
+  `message_thread_id`, `channel`. **CHỈ khoá định danh, KHÔNG ghi lại nội dung** — dòng
+  `telegramDfOptions` phía trên đã chở nguyên văn tin kèm tên/SĐT khách vào log, không nhân đôi PII.
+  Bọc `try/catch` + nullsafe: dòng chẩn đoán KHÔNG được làm hỏng một lượt gửi đã thành công (bài học
+  từ `apps_cache_group_version()` cùng đợt — thêm log vào đường chạy nóng đã làm chết 3 ca test leadgen).
+  Khối `catch` cũng chuyển sang nullsafe cùng lý do.
+
 ### Fixed (tiếp)
 - **[29/10/2026] 🔴 Log chẩn đoán của `apps_cache_group_version()` làm CHẾT lượt ghi cache khi logger
   không dùng được.** Bản vá nhãn-duy-nhất ghi log WARNING ngay trên **đường chạy bình thường** (bản gốc
