@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+- **[29/10/2026] `apps_cache_flush(null, $group)` không có tác dụng trên driver database/memcached.**
+  Xoá nhóm = `Cache::increment('cachever:<nhóm>')`, nhưng `DatabaseStore`/`MemcachedStore` trả `false`
+  và KHÔNG tạo key khi key chưa tồn tại ⇒ version luôn là 0, mọi lần xoá nhóm đều vô hiệu, dữ liệu cũ
+  được trả ra tới hết TTL. Nay `increment` trả `false` thì ghi `version + 1`. Redis/file/array không đổi.
+  Kiểm bằng script giả lập 2 kiểu driver: FAIL trên code trước, OK sau khi sửa.
+
 ### Changed
 - **[29/10/2026] `apps_cache_*` — chuyển sang versioned-namespace, bỏ danh sách thành viên nhóm (FIFO 100 key).**
   Theo `tasks/audit-he-thong-toi-uu-chuyen-sau.md` §2.5 (user đồng ý áp đề xuất này).

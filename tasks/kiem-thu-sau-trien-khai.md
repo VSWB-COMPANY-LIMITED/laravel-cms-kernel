@@ -54,7 +54,9 @@ dữ liệu hoặc nơi gọi của từng app. Mỗi mục ghi điều cần l�
 2. **Notification sinh nhật gửi template tới địa chỉ cứng** `toan@visualweber.com` với `debug=true`, và
    `setVariableValues(['email', $email])` truyền mảng danh sách thay vì khoá-giá-trị. Có thể là ý đồ (gửi
    bản sao cho chủ dự án) hoặc là code thử để quên. Đối chiếu chữ ký `EmailHandler` trong vendor của app.
-3. **5 hàm login CRM** (`apps_pull_login`, `apps_vtiger_login`, `apps_toyota_crm_login`,
+3. *(Cập nhật 29/10: commit `bacfe19` đã thêm timeout 5s/20s qua `config('kernel.kernel.general.crm_login_timeout')`
+   — kiểm timeout này có hợp với CRM đối tác thật không; các ý còn lại bên dưới vẫn chưa xử lý.)*
+   **5 hàm login CRM** (`apps_pull_login`, `apps_vtiger_login`, `apps_toyota_crm_login`,
    `apps_mmv_crm_login`, `apps_apollo_crm_login`):
    - không có timeout cURL (có thể treo worker vô hạn);
    - trả `"error" => false` ngay trong nhánh lỗi;
@@ -63,7 +65,9 @@ dữ liệu hoặc nơi gọi của từng app. Mỗi mục ghi điều cần l�
    - `apps_pull_login` gọi HTTP vòng về chính app.
    Cần biết: CRM đối tác chậm tối đa bao lâu (để chọn timeout), và **mọi nơi gọi** đang đọc field `error`
    theo nghĩa nào trước khi đổi.
-4. **`FieldHelper::saveCustomFields`** truy cập `$data[$row['slug']]` không kiểm key.
+4. *(Cập nhật 29/10: commit `bacfe19` đã bọc vòng lưu trong `DB::transaction()` — một field lỗi thì không
+   field nào được lưu, thay vì lưu một nửa. Kiểm nơi gọi có dựa vào việc lưu một phần không.)*
+   **`FieldHelper::saveCustomFields`** truy cập `$data[$row['slug']]` không kiểm key.
    - Thiếu key ⇒ Laravel ném `ErrorException`.
    - Sửa bằng `?? ''` sẽ **ghi đè giá trị đang có thành rỗng** khi cập nhật một phần.
    - Cần biết nơi gọi có luôn truyền đủ 6 slug không, và thiếu key thì nên bỏ qua hay ghi rỗng.
@@ -77,7 +81,11 @@ dữ liệu hoặc nơi gọi của từng app. Mỗi mục ghi điều cần l�
    chính người gọi**. Rủi ro: lộ cookie HttpOnly nếu trang có XSS. **`GET /api/v1/cms/plugins/get-plugins`**
    công khai danh sách plugin. Kiểm app có công cụ nào đang dùng hai endpoint này không, rồi quyết định gỡ
    hay giới hạn môi trường.
-8. **Thiết kế `apps_cache_*`** (đọc kèm ghi, FIFO 100 key tự xoá dữ liệu còn hạn), **4 request Google cho
+8. *(Cập nhật 29/10: commit `cc83cbd` đã chuyển `apps_cache_*` sang versioned namespace. Một lỗi kèm theo đã
+   sửa: xoá nhóm không có tác dụng trên driver database/memcached. **Bắt buộc kiểm trong app:** sau khi cập
+   nhật gói cache cũ trượt một lần; xoá nhóm rồi đọc lại phải ra dữ liệu mới, trên đúng driver cache của
+   app (`CACHE_STORE`/`CACHE_DRIVER`).)*
+   **Thiết kế `apps_cache_*`** (đọc kèm ghi, FIFO 100 key tự xoá dữ liệu còn hạn), **4 request Google cho
    mỗi lead**, **session trên route `api`**: tối ưu hiệu năng, cần đo trong app. Xem
    `tasks/audit-he-thong-toi-uu-chuyen-sau.md` mục 2.
 9. **Dữ liệu địa giới hành chính** (`apps_province_detection`, 63 tỉnh cũ, còn "Hà Tây"). Phụ thuộc CRM đại

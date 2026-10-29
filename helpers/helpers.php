@@ -2629,7 +2629,12 @@ if (!function_exists('apps_cache_flush')) {
                 // (Cache::increment()), không còn race đọc-kèm-ghi của thiết kế cũ.
                 $groupSlug = Str::slug($group);
 
-                Cache::increment('cachever:' . $groupSlug);
+                // DatabaseStore/MemcachedStore trả false và KHÔNG tạo key khi key chưa tồn tại (Redis,
+                // file, array thì tự khởi tạo) ⇒ lần xoá nhóm đầu tiên sẽ không có tác dụng. Tự ghi
+                // version kế tiếp trong trường hợp đó.
+                if (Cache::increment('cachever:' . $groupSlug) === false) {
+                    Cache::forever('cachever:' . $groupSlug, apps_cache_group_version($groupSlug) + 1);
+                }
 
                 apps_log($logger)->info("Flushed group cache (version bump)", [
                     'group' => $group,
