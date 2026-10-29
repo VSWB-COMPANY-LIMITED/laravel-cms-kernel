@@ -259,7 +259,7 @@ if (!function_exists('apps_build_mapped_values')) {
         string $mode = 'coalesce',
         bool $removeEmptyValues = true
     ): array {
-        Log::channel($logger)->info('hub_step fields mapping to spreadsheet', (array) $mappings);
+        apps_log($logger)->info('hub_step fields mapping to spreadsheet', (array) $mappings);
 
         $values_mappings = [];
 
@@ -267,7 +267,7 @@ if (!function_exists('apps_build_mapped_values')) {
             /* reset giá trị trước mỗi vòng lặp để tránh dính data cũ */
             $values_mappings[$mapping_key] = null;
             $bucket = [];
-            Log::channel($logger)->info('mapping_key', (array) $mapping_key);
+            apps_log($logger)->info('mapping_key', (array) $mapping_key);
 
             foreach ((array) $_mappings as $__mapping) {
                 if (!isset($__mapping['key'])) continue;
@@ -283,11 +283,11 @@ if (!function_exists('apps_build_mapped_values')) {
 
                 /* chuẩn hóa key: ascii + slug + bỏ separator */
                 $__mapping_key = Str::slug(Str::ascii($rawKey), '');
-                Log::channel($logger)->info('__mapping_key slug', (array) $__mapping_key);
+                apps_log($logger)->info('__mapping_key slug', (array) $__mapping_key);
 
                 /* lấy giá trị từ input */
                 $raw = Arr::get($data, $__mapping_key);
-                Log::channel($logger)->info('__raw value', (array) $raw);
+                apps_log($logger)->info('__raw value', (array) $raw);
 
                 /* chuẩn hóa value: trim, bỏ rỗng, hỗ trợ mảng */
                 if (is_array($raw)) {
@@ -316,7 +316,7 @@ if (!function_exists('apps_build_mapped_values')) {
                     $values_mappings[$mapping_key] = $bucket[0];
                 }
             } else {
-                Log::channel($logger)->warning('hub_step fields mapping data is empty');
+                apps_log($logger)->warning('hub_step fields mapping data is empty');
             }
         }
 
@@ -328,9 +328,107 @@ if (!function_exists('apps_build_mapped_values')) {
             );
         }
 
-        Log::channel($logger)->info('hub_step fields mapping data to spreadsheet', $values_mappings);
+        apps_log($logger)->info('hub_step fields mapping data to spreadsheet', $values_mappings);
 
         return $values_mappings;
+    }
+}
+if (!function_exists('apps_gsheet_header_row')) {
+    /**
+     * Đọc DÒNG HEADER (dòng 1) của một tab — chỉ tải đúng 1 dòng.
+     *
+     * [Port từ v7.x — commit 0074a20, 2ea8dff]
+     *
+     * ## Vì sao có hàm này (sự cố THẬT 26–27/09/2026, ghi nhận trên v7.x)
+     *
+     * Trước đây header lấy bằng `->get()->pull(0)`: `get()` tải TOÀN BỘ tab rồi mới lấy dòng đầu.
+     * Với một sheet 41.000 dòng của khách, `values:batchGet?ranges=Sheet1` không trả kịp ⇒ 395
+     * lần timeout trong một ngày, mỗi lần chờ 60s. Trước khi có trần thời gian, chính nó treo vô
+     * hạn và giết worker hàng đợi suốt 24,5 giờ, kéo 608 job ứ lại.
+     *
+     * Đây là lỗi TỰ NẶNG DẦN: tab càng nhiều dữ liệu càng chậm, nên không con số timeout nào là
+     * "đủ" — phải thôi tải cả tab.
+     *
+     * ## Vì sao gọi thẳng service, thay vì ->range('1:1') cho gọn
+     *
+     * `Sheets` của gói bản 5.x/6.x bind bằng `singleton()` (cùng MỘT instance suốt tiến trình
+     * worker, sống qua nhiều job), `$range` STICKY — `spreadsheet()`/`sheet()`/`sheetById()` đều
+     * KHÔNG reset nó — và `append()` lại dùng chính `ranges()`. Nên nếu set `range('1:1')` mà vì bất
+     * kỳ lý do gì nó không được trả về nguyên trạng, lượt ghi kế tiếp sẽ ghi vào đúng DÒNG HEADER.
+     *
+     * Hàm này vì vậy KHÔNG chạm `$range`: lấy service rồi gọi API trực tiếp. Đọc là đọc, ghi là
+     * ghi, không dùng chung state.
+     *
+     * @param  array|string  $accessToken  token OAuth2
+     * @param  string  $spreadsheetId  id bảng tính
+     * @param  string  $sheetName  TÊN tab — lấy từ `->sheetById($id)->ranges()` để đúng cả khi
+     *                             khách đổi tên tab, thay vì tin giá trị lưu trong cấu hình
+     * @return array dòng header; mảng rỗng nếu tab rỗng
+     */
+    function apps_gsheet_header_row($accessToken, string $spreadsheetId, string $sheetName): array
+    {
+        // A1 notation: tên tab phải bọc nháy đơn (nhân đôi nháy đơn bên trong) — tab tên
+        // "Data 2026" hay "Khach's" để trần thì Google trả "Unable to parse range".
+        $quoted = "'" . str_replace("'", "''", $sheetName) . "'";
+
+        $service = Sheets::setAccessToken($accessToken)->getService();
+
+        // Trần thời gian RIÊNG cho lượt đọc này (mặc định chung 60 giây là vô nghĩa với 1 hàng).
+        // Client DÙNG CHUNG với lượt GHI nên phải TRẢ LẠI nguyên trạng trong `finally`.
+        $client = $service->getClient();
+        $previousHttpClient = $client->getHttpClient();
+
+        // `getHttpClient()` không hứa trả GuzzleHttp\Client — mà `getConfig()` chỉ Guzzle mới có.
+        // Không phải Guzzle ⇒ bỏ qua bước hạ trần, giữ nguyên đường cũ.
+        $canScopeTimeout = $previousHttpClient instanceof \GuzzleHttp\Client;
+
+        try {
+            if ($canScopeTimeout) {
+                $client->setHttpClient(new \GuzzleHttp\Client([
+                    'base_uri' => $previousHttpClient->getConfig('base_uri'),
+                    'http_errors' => false,
+                    'connect_timeout' => (int) config('google.http.connect_timeout', 10),
+                    'timeout' => (int) config('google.http.header_read_timeout', 8),
+                ]));
+            }
+
+            $response = $service->spreadsheets_values
+                ->batchGet($spreadsheetId, ['ranges' => $quoted . '!1:1']);
+        } finally {
+            if ($canScopeTimeout) {
+                $client->setHttpClient($previousHttpClient);
+            }
+        }
+
+        $valueRanges = $response->getValueRanges();
+
+        if (blank($valueRanges)) {
+            return [];
+        }
+
+        $values = $valueRanges[0]->getValues();
+
+        return is_array($values) && isset($values[0]) && is_array($values[0]) ? $values[0] : [];
+    }
+}
+if (!function_exists('apps_gsheet_append_range')) {
+    /**
+     * Range A1 để `append()` chỉ dò bảng trong cột A (tên tab bọc nháy đơn, nhân đôi nháy đơn bên trong).
+     * [Port từ v7.x — commit eccf4b9]
+     */
+    function apps_gsheet_append_range(string $tab): string
+    {
+        return "'" . str_replace("'", "''", $tab) . "'!A:A";
+    }
+}
+if (!function_exists('apps_gsheet_range_starts_at_column_a')) {
+    /**
+     * `updatedRange` Google trả về (vd "'Raw Lead'!A3605:M3605") có bắt đầu ở cột A không.
+     * [Port từ v7.x — commit eccf4b9]
+     */
+    function apps_gsheet_range_starts_at_column_a(?string $updatedRange): bool
+    {
+        return (bool) preg_match('/!A\d+(?::[A-Z]+\d+)?$/', (string) $updatedRange);
     }
 }
 if (!function_exists('apps_google_sheet')) {
@@ -363,9 +461,9 @@ if (!function_exists('apps_google_sheet')) {
         $cache_force_refresh = false // cho phép bỏ qua cache
     ) {
         try {
-            Log::channel($logger)->info("==========> " . __FUNCTION__ . " helper is running");
-            Log::channel($logger)->info(__FUNCTION__ . ": spreadsheet variables", (array) $spreadsheet);
-            // Log::channel($logger)->info("Spreadsheet data captured", (array) $spreadsheetData);
+            apps_log($logger)->info("==========> " . __FUNCTION__ . " helper is running");
+            apps_log($logger)->info(__FUNCTION__ . ": spreadsheet variables", (array) $spreadsheet);
+            // apps_log($logger)->info("Spreadsheet data captured", (array) $spreadsheetData);
 
             #region validate required spreadsheet config
             if (isset($spreadsheetData['status']) && $spreadsheetData['status'])
@@ -386,7 +484,7 @@ if (!function_exists('apps_google_sheet')) {
             if (!Arr::has($spreadsheet, 'sheet.name') || blank(Arr::get($spreadsheet, 'sheet.name'))) {
                 throw new Exception("Sheet name is required.");
             }
-            // Log::channel($logger)->info('[GSheet::Spreadsheet Info]', [
+            // apps_log($logger)->info('[GSheet::Spreadsheet Info]', [
             //     'spreadsheet_id' => Arr::get($spreadsheet, 'spreadsheet.id'),
             //     'sheet_id' => Arr::get($spreadsheet, 'sheet.id'),
             //     'sheet_name' => Arr::get($spreadsheet, 'sheet.name'),
@@ -404,14 +502,56 @@ if (!function_exists('apps_google_sheet')) {
             try {
                 if ($credentialsType == 'oauth2') { // using laravel style
                     #region Use a "OAuth2 Account" to connection and spreadsheet process data
-                    // Log::channel($logger)->info("Starting with credential '{$credentialsType}'");
+                    // apps_log($logger)->info("Starting with credential '{$credentialsType}'");
 
                     $connection = $connection['connection'];
-                    // Log::channel($logger)->info("Connection captured", $connection);
-                    $accessToken = [
-                        'access_token' => $connection['provider_exchange_token'],
-                        'refresh_token' => $connection['provider_exchange_refresh_token'],
-                    ]; // $accessToken = json_decode(file_get_contents(storage_path('app/google-oauth2-tokens.json')), true);
+                    // apps_log($logger)->info("Connection captured", $connection);
+                    // [Port từ v7.x — commit 34edf15] OAuth access token PHẢI kèm expires_in/created.
+                    // Nếu chỉ có access_token + refresh_token (như code cũ), Google\Client::isAccessTokenExpired()
+                    // LUÔN trả true → Sheets::setAccessToken() của gói gọi fetchAccessTokenWithRefreshToken()
+                    // MỖI lần → mỗi ghi Sheet phát sinh 1 request thừa tới oauth2.googleapis.com/token. Khi
+                    // sync ồ ạt (nhiều worker) → Google throttle ở tầng TLS (sslv3 alert handshake failure)
+                    // → ghi Sheet fail rải rác. Fix: refresh ĐÚNG MỘT LẦN rồi CACHE token đầy đủ theo
+                    // refresh_token, tái dùng tới gần hết hạn. Fallback về hành vi cũ nếu thiếu
+                    // refresh_token / config / refresh lỗi → không bao giờ tệ hơn trước.
+                    $refreshToken = (string) ($connection['provider_exchange_refresh_token'] ?? '');
+                    $legacyToken = [
+                        'access_token' => $connection['provider_exchange_token'] ?? null,
+                        'refresh_token' => $refreshToken,
+                    ];
+
+                    if (blank($refreshToken)) {
+                        $accessToken = $legacyToken; // không refresh được → giữ nguyên như cũ
+                    } else {
+                        $oauthCacheKey = 'apps_google_sheet:oauth2_token:' . sha1($refreshToken);
+                        $accessToken = Cache::get($oauthCacheKey);
+
+                        if (blank($accessToken) || blank($accessToken['access_token'] ?? null)) {
+                            try {
+                                $oauthClient = new Client();
+                                $oauthClient->setClientId((string) config('google.client_id'));
+                                $oauthClient->setClientSecret((string) config('google.client_secret'));
+                                $fresh = $oauthClient->fetchAccessTokenWithRefreshToken($refreshToken);
+
+                                if (empty($fresh['error']) && !empty($fresh['access_token'])) {
+                                    // Google thường KHÔNG trả lại refresh_token khi refresh → giữ token gốc.
+                                    $fresh['refresh_token'] = $fresh['refresh_token'] ?? $refreshToken;
+                                    // created bảo đảm có để isAccessTokenExpired() tính đúng hạn.
+                                    $fresh['created'] = $fresh['created'] ?? time();
+                                    // buffer 120s: evict sớm để không dùng token sát hạn.
+                                    $oauthTtl = max(60, (int) ($fresh['expires_in'] ?? 3600) - 120);
+                                    Cache::put($oauthCacheKey, $fresh, $oauthTtl);
+                                    $accessToken = $fresh;
+                                } else {
+                                    apps_log($logger)->warning(__FUNCTION__ . ": oauth2 refresh returned no access_token, fallback to legacy token", (array) ($fresh['error'] ?? 'unknown'));
+                                    $accessToken = $legacyToken;
+                                }
+                            } catch (\Throwable $e) {
+                                apps_log($logger)->warning(__FUNCTION__ . ": oauth2 token refresh/cache failed, fallback to legacy token: " . $e->getMessage());
+                                $accessToken = $legacyToken;
+                            }
+                        }
+                    }
                     #endregion
                 } else { // using non-laravel style
                     #region Setup Google Client & Service Account
@@ -428,7 +568,7 @@ if (!function_exists('apps_google_sheet')) {
                     #endregion
 
                     #region Use a "Service Account" to connection and spreadsheet process data
-                    // Log::channel($logger)->info("Starting with credential '{$credentialsType}'");
+                    // apps_log($logger)->info("Starting with credential '{$credentialsType}'");
 
                     #region Setup Google Credentials
                     if (!$credentialsFile)
@@ -443,7 +583,7 @@ if (!function_exists('apps_google_sheet')) {
                         $client->setAccessToken($accessToken);
                     }
                     if ($client->isAccessTokenExpired()) {
-                        Log::channel($logger)->warning(__FUNCTION__, (array) "Token is expired, it will be automatically renew rightnow");
+                        apps_log($logger)->warning(__FUNCTION__, (array) "Token is expired, it will be automatically renew rightnow");
                         if ($client->getRefreshToken()) {
                             $client->fetchAccessTokenWithRefreshToken($client->getRefreshToken());
                         } else {
@@ -462,13 +602,18 @@ if (!function_exists('apps_google_sheet')) {
                     #endregion
                 }
             } catch (\Throwable $th) {
-                Log::channel($logger)->error(__FUNCTION__ . ": " . $th->getMessage());
+                apps_log($logger)->error(__FUNCTION__ . ": " . $th->getMessage());
                 throw $th; // throw errors
             }
             #endregion
 
             #region Spreadsheet process data
             $values = $values_mappings = [];
+
+            // [Port từ v7.x — commit 13058ea] Khai báo ở scope NGOÀI: `$headers` chỉ được gán trong
+            // nhánh `$with_keys`, nhưng bước sắp cột trước `append()` (cuối hàm) đọc nó ở scope này.
+            $headers = [];
+
             // $spreadsheet['spreadsheet']['id'] = "1zfwtB8vh5RKp9va11F3XHRCC30Zpzbu_1I-RLwS6ugU";
             // $spreadsheet['sheet']['name'] = "LIST DATA";
 
@@ -488,7 +633,7 @@ if (!function_exists('apps_google_sheet')) {
                     'sheet_name' => Arr::get($spreadsheet, 'sheet.name'),
                 ]));
 
-                // Log::channel($logger)->info('[GSheet::CacheKey Usage]', [
+                // apps_log($logger)->info('[GSheet::CacheKey Usage]', [
                 //     'cache_key' => $cacheKey,
                 //     'spreadsheet_id' => $spreadsheet['spreadsheet']['id'],
                 //     'sheet_id' => $spreadsheet['sheet']['id'],
@@ -498,62 +643,71 @@ if (!function_exists('apps_google_sheet')) {
                 // ]);
                 #endregion
 
-                if ($cache_headers && !$cache_force_refresh) {
+                // [Port từ v7.x — commit 0074a20, 417457d, a7f8191] ĐỌC TƯƠI LÀ ĐƯỜNG CHÍNH, chỉ đọc
+                // DÒNG 1 (không tải cả tab). Cache 300s + "header tốt gần nhất" (LKG) 7 ngày hạ xuống
+                // làm LƯỚI ĐỠ khi đọc tươi lỗi (quota 429, mạng, timeout) — có ghi log phân biệt rõ.
+                //
+                // Vì sao: (1) tải cả tab bằng `->get()->pull(0)` là lỗi tự nặng dần theo kích thước
+                // sheet (41.000 dòng ⇒ timeout 60s hàng trăm lần/ngày). (2) Từ khi sắp cột trước
+                // `append()` (cuối hàm), header cũ trong cache ⇒ dòng ghi lệch cột IM LẶNG, nên cache
+                // không được là đường chính. (3) Sự cố DGM/Toyota 14/10: khi Google chậm kéo dài, cache
+                // 300s hết hạn và không nạp lại được ⇒ lead rơi vào nhánh "không có header" và mất hẳn;
+                // LKG 7 ngày đỡ đúng ca này.
+                //
+                // `$cache_force_refresh` nay không còn ý nghĩa (đường chính đã luôn tươi). Giữ tham số
+                // để không phá chữ ký hàm; @deprecated.
+                $headers = [];
+                $headersFromCache = false;
 
-                    // if (Cache::has($cacheKey)) Log::channel($logger)->info('[GSheet Cache::Hit]', ['cache_key' => $cacheKey]);
-                    // else Log::channel($logger)->info('[GSheet Cache::Miss]', ['cache_key' => $cacheKey]);
-
-                    /**
-                     * nếu cache HIT => remember sẽ tự động return cached data nếu có, không thì sẽ chạy vào callback và store data vào cache
-                     */
-                    $headers = Cache::remember($cacheKey, $cache_ttl, function () use ($accessToken, $spreadsheet, $logger, $cacheKey, $cache_ttl) {
-                        // Log::channel($logger)->info('[GSheet Cache::Rebuilding headers]', [
-                        //     'spreadsheet_id' => $spreadsheet['spreadsheet']['id'],
-                        //     'sheet_id' => $spreadsheet['sheet']['id'] ?? '',
-                        //     'sheet_name' => $spreadsheet['sheet']['name'] ?? '',
-                        //     'cache_key' => $cacheKey,
-                        // ]);
-
-                        $fetched = Sheets::setAccessToken($accessToken)
-                            ->spreadsheet($spreadsheet['spreadsheet']['id']) // đây là điểm làm thay đổi context state, cẩn thận nếu dùng không tường minh logic append data
-                            ->sheetById($spreadsheet['sheet']['id'])
-                            ->get()
-                            ->pull(0);
-
-                        return is_array($fetched) ? $fetched : collect($fetched)->toArray();
-                    });
-
-                    #region debug cache
-                    // apps_cache_debug($cacheKey, $logger);
-                    // Log::channel($logger)->info('[GSheet Cache::Returned Headers]', [
-                    //     'source' => Cache::has($cacheKey) ? 'cache-hit' : 'callback',
-                    //     'cache_key' => $cacheKey,
-                    //     'headers' => $headers,
-                    // ]);
-                    #endregion
-                } else {
-                    // Log::channel($logger)->info('[GSheet Cache::Bypass or Forced Refresh]', [
-                    //     'cache_force_refresh' => $cache_force_refresh,
-                    //     'enabled' => $cache_headers,
-                    //     'cache_key' => $cacheKey,
-                    //     'ttl' => $cache_ttl,
-                    // ]);
-
-                    $headers = Sheets::setAccessToken($accessToken)
+                try {
+                    // `sheetById()` để resolve TÊN tab từ id; `ranges()` trả tên đó khi `$range` rỗng.
+                    // Riêng bản v6: `Sheets` của gói 5.x/6.x là `singleton()` (sống qua nhiều job trong
+                    // cùng worker) và `apps_google_sheet_update_by_log()` đặt range mà không dọn ⇒ dọn
+                    // `range('')` TRƯỚC khi đọc `ranges()`, nếu không sẽ đọc header theo range rò rỉ.
+                    $client = Sheets::setAccessToken($accessToken)
                         ->spreadsheet($spreadsheet['spreadsheet']['id']) // đây là điểm làm thay đổi context state, cẩn thận nếu dùng không tường minh logic append data
                         ->sheetById($spreadsheet['sheet']['id'])
-                        ->get()
-                        ->pull(0);
+                        ->range('');
 
-                    $headers = is_array($headers) ? $headers : collect($headers)->toArray();
+                    $fetched = apps_gsheet_header_row(
+                        $accessToken,
+                        $spreadsheet['spreadsheet']['id'],
+                        (string) $client->ranges()
+                    );
 
-                    if ($cache_headers) {
-                        Cache::put($cacheKey, $headers, $cache_ttl);
-                        // Log::channel($logger)->info('[GSheet Cache::Store]', [
-                        //     'cache_key' => $cacheKey,
-                        //     'ttl' => $cache_ttl,
-                        // ]);
+                    $headers = is_array($fetched) ? $fetched : collect($fetched)->toArray();
+                } catch (\Throwable $e) {
+                    // Quota (429), mạng, token — KHÔNG để cả lượt ghi chết vì một phép đọc phụ.
+                    $headers = $cache_headers ? (array) Cache::get($cacheKey, []) : [];
+                    $headersFromCache = !blank($headers);
+                    $headersFromLastKnownGood = false;
+
+                    if (blank($headers) && $cache_headers) {
+                        $headers = (array) Cache::get($cacheKey . ':lkg', []);
+                        $headersFromLastKnownGood = !blank($headers);
+                        $headersFromCache = $headersFromLastKnownGood;
                     }
+
+                    $fallbackLabel = $headersFromLastKnownGood
+                        ? ' — dùng HEADER TỐT GẦN NHẤT (LKG), dòng này có thể lệch cột nếu khách vừa đổi cột'
+                        : ($headersFromCache
+                            ? ' — sắp cột theo header CŨ trong cache, dòng này có thể lệch cột'
+                            : ' — KHÔNG có cache để đỡ');
+
+                    apps_log($logger)->warning('[GSheet] Đọc header tươi THẤT BẠI' . $fallbackLabel, [
+                        'spreadsheet_id' => $spreadsheet['spreadsheet']['id'] ?? '',
+                        'sheet_id' => $spreadsheet['sheet']['id'] ?? '',
+                        'cache_key' => $cacheKey,
+                        'fell_back_to_cache' => $headersFromCache,
+                        'fell_back_to_lkg' => $headersFromLastKnownGood,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+
+                // Chỉ lưu khi ĐỌC ĐƯỢC thật. Ghi mảng rỗng vào cache là tự đặt bẫy cho lượt sau.
+                if ($cache_headers && !$headersFromCache && !blank($headers)) {
+                    Cache::put($cacheKey, $headers, $cache_ttl);
+                    Cache::put($cacheKey . ':lkg', $headers, now()->addDays(7));
                 }
                 #endregion
 
@@ -565,12 +719,12 @@ if (!function_exists('apps_google_sheet')) {
                 #endregion
 
                 if (count($mappings)) { // Custom headers mappings w/ "field key" of ads-form vs "column" name of spreadsheet.
-                    Log::channel($logger)->info('hub_step fields mapping to spreadsheet', (array) $mappings);
+                    apps_log($logger)->info('hub_step fields mapping to spreadsheet', (array) $mappings);
 
                     #region before improve
                     // foreach ($mappings as $mapping_key => $_mappings) {
                     //     $values_mappings[$mapping_key] = null;
-                    //     Log::channel($logger)->info('mapping_key', (array) $mapping_key);
+                    //     apps_log($logger)->info('mapping_key', (array) $mapping_key);
                     //     if (count($_mappings)) {
                     //         foreach ($_mappings as $__mapping) {
                     //             /** 
@@ -579,7 +733,7 @@ if (!function_exists('apps_google_sheet')) {
                     //              */
                     //             $__mapping_key = Str::slug($__mapping['key'], '');
                     //             $__mapping_key = isset(explode("|", $__mapping_key)[1]) ? explode("|", $__mapping_key)[1] : $__mapping_key;
-                    //             Log::channel($logger)->info('__mapping_key slug', (array) $__mapping_key);
+                    //             apps_log($logger)->info('__mapping_key slug', (array) $__mapping_key);
 
                     //             if (
                     //                 (isset($spreadsheetData['providerformid']) && $spreadsheetData['providerformid']) ||
@@ -607,7 +761,7 @@ if (!function_exists('apps_google_sheet')) {
                     );
                     #endregion
 
-                    Log::channel($logger)->info('hub_step fields mapping data to spreadsheet', $values_mappings);
+                    apps_log($logger)->info('hub_step fields mapping data to spreadsheet', $values_mappings);
                 }
 
                 foreach ($headers as $header) { // Default headers mappings
@@ -616,34 +770,101 @@ if (!function_exists('apps_google_sheet')) {
                     }
                 }
                 $values = array_filter($values, fn($value) => !is_null($value) && $value !== '');
-                Log::channel($logger)->info('Spreadsheet Data with default headers', $values);
+                apps_log($logger)->info('Spreadsheet Data with default headers', $values);
 
                 $values = array_merge($values, $values_mappings);
             } else {
                 $values = array_values($spreadsheetData);
             }
 
-            Log::channel($logger)->info('Spreadsheet values Data', $values);
-            // Log::channel($logger)->info('Writing to spreadsheet', [
+            apps_log($logger)->info('Spreadsheet values Data', $values);
+            // apps_log($logger)->info('Writing to spreadsheet', [
             //     'spreadsheet_id' => $spreadsheet['spreadsheet']['id'],
             //     'sheet_id' => $spreadsheet['sheet']['id'],
             //     'sheet_name' => $spreadsheet['sheet']['name'],
             // ]);
 
-            // Log::channel($logger)->info('[GSheet Append::Started]', [
+            // apps_log($logger)->info('[GSheet Append::Started]', [
             //     'spreadsheet_id' => Arr::get($spreadsheet, 'spreadsheet.id'),
             //     'sheet_id' => Arr::get($spreadsheet, 'sheet.id'),
             //     'values' => $values,
             // ]);
 
+            // 🔴🔴 ĐỪNG "SỬA" CÁCH GHI — vẫn `append()` trần của gói (OVERWRITE), KHÔNG tự tính dòng cuối,
+            // KHÔNG `values.update` vào A{last+1}, KHÔNG INSERT_ROWS. Các cách đó đã thử trên v7.x và bị
+            // gỡ vì gây sự cố nặng hơn (mất lead im lặng do ghi đè lẫn nhau). Muốn đụng: HỎI CHỦ SẢN PHẨM.
+            //
+            // [Port từ v7.x — commit 13058ea] SẮP SẴN THEO HEADER TRƯỚC KHI GỌI `append()`.
+            // `append()` gọi `orderAppendables()`; với mảng CÓ KHOÁ, hàm đó tự đọc header bằng
+            // `first()` → `all()` ⇒ tải TOÀN BỘ tab MỖI LEAD (tab 26.783 dòng ≈ 24 MB/lượt ghi).
+            // Truyền mảng đã tuần tự thì `orderAppendables()` trả về ngay, không đọc gì.
+            //
+            // Công thức sao đúng `SheetsValues::orderAppendables()` của gói BẢN CŨ (5.x/6.x) mà nền v6
+            // dùng: ô trống khi `is_null($value) || $key === $value`. KHÔNG dùng `empty()` như bản
+            // v7.x (gói 7.x đã đổi sang `empty()`): với gói cũ, ô có giá trị "0" vẫn được ghi là "0".
+            //
+            // Nhánh `$with_keys = false` đã `array_values()` từ trước ⇒ `isAssoc` false ⇒ bỏ qua.
+            if (!blank($headers) && !blank($values) && Arr::isAssoc($values)) {
+                $ordered = array_values(array_replace(array_flip($headers), $values));
+
+                $values = [];
+                foreach ($ordered as $columnIndex => $cellValue) {
+                    $values[] = (is_null($cellValue) || $columnIndex === $cellValue) ? '' : $cellValue;
+                }
+            }
+
+            // [Port từ v7.x — commit a7f8191] CHẶN LƯỢT GHI CHẮC CHẮN HỎNG — thà báo lỗi còn hơn mất
+            // lead im lặng. `$headers` rỗng (đọc tươi hỏng, cache hỏng, LKG cũng rỗng) ⇒ `$values` còn
+            // dạng CÓ KHOÁ ⇒ `append()` tự tải TOÀN BỘ tab ⇒ timeout ⇒ dòng không bao giờ được ghi mà
+            // không log nào báo. Ném lỗi ở đây không làm mất thêm gì, nhưng biến "mất im lặng" thành
+            // "lỗi nhìn thấy được" để nơi gọi ghi nhận và thử lại.
+            if (blank($headers) && !blank($values) && Arr::isAssoc($values)) {
+                apps_log($logger)->error('[GSheet] BỎ QUA lượt ghi: không có header để sắp cột — lượt này chắc chắn timeout', [
+                    'spreadsheet_id' => Arr::get($spreadsheet, 'spreadsheet.id'),
+                    'sheet_id' => Arr::get($spreadsheet, 'sheet.id'),
+                ]);
+
+                throw new Exception(
+                    'Không đọc được tiêu đề cột của Google Sheet (Google phản hồi chậm). '
+                    . 'Dòng này CHƯA được ghi — hệ thống sẽ thử lại ở lượt đồng bộ sau.'
+                );
+            }
+
+            // [Port từ v7.x — commit eccf4b9] NEO TÌM BẢNG VÀO CỘT A — chữa lỗi "cột nhảy".
+            // `append()` với range = tên tab để Google TỰ DÒ bảng. Khi có dòng trống hoàn toàn nằm giữa
+            // dữ liệu (xoá NỘI DUNG dòng thay vì xoá dòng) mà vài cột bên trái trống sẵn, Google coi phần
+            // bên phải là "bảng" và ghi lệch sang phải, dòng sau lệch tiếp ⇒ lệch vô tận. Range
+            // `'Tab'!A:A` khiến Google chỉ dò trong cột A ⇒ luôn bắt đầu ở A. Chỉ neo khi A1 có tiêu đề.
+            //
             // nên chỉ định ->spreadsheet 'spreadsheet.id' tường minh, tránh reuse từ previous stage,
             // cẩn thận việc insert sai spreadsheet nếu context stage "spreadsheet.id" bị tác động ở đâu đó
-            $result = Sheets::setAccessToken($accessToken)
+            $sheetsClient = Sheets::setAccessToken($accessToken)
                 ->spreadsheet(Arr::get($spreadsheet, 'spreadsheet.id'))
                 ->sheetById(Arr::get($spreadsheet, 'sheet.id'))
-                ->append([$values]);
+                ->range(''); // range "dính" giữa các lượt dùng chung client: luôn dọn trước khi dùng
 
-            // Log::channel($logger)->info('[GSheet Append::Done]', [
+            $tabTitle = (string) $sheetsClient->ranges();
+
+            try {
+                if ($tabTitle !== '' && !blank(Arr::get($headers, 0))) {
+                    $sheetsClient->range(apps_gsheet_append_range($tabTitle));
+                }
+
+                $result = $sheetsClient->append([$values]);
+            } finally {
+                $sheetsClient->range('');
+            }
+
+            $writtenRange = (string) data_get($result->toSimpleObject(), 'updates.updatedRange', '');
+            if ($writtenRange !== '' && !blank(Arr::get($headers, 0)) && !apps_gsheet_range_starts_at_column_a($writtenRange)) {
+                apps_log($logger)->error('[GSheet] Dòng vừa ghi KHÔNG bắt đầu ở cột A — nghi lệch cột', [
+                    'spreadsheet_id' => Arr::get($spreadsheet, 'spreadsheet.id'),
+                    'sheet_id' => Arr::get($spreadsheet, 'sheet.id'),
+                    'updated_range' => $writtenRange,
+                ]);
+            }
+
+            // apps_log($logger)->info('[GSheet Append::Done]', [
             //     'result' => $result->toSimpleObject() ?? [],
             // ]);
             #endregion Spreadsheet process data
@@ -661,8 +882,8 @@ if (!function_exists('apps_google_sheet')) {
                 "message" => "Request has been successfully processed"
             ]);
         } catch (\Throwable $th) {
-            Log::channel($logger)->error(__FUNCTION__, (array) $th->getMessage());
-            Log::channel($logger)->error(__FUNCTION__, (array) $th->getTraceAsString());
+            apps_log($logger)->error(__FUNCTION__, (array) $th->getMessage());
+            apps_log($logger)->error(__FUNCTION__, (array) $th->getTraceAsString());
             return json_encode([
                 "error" => true,
                 'code' => $th->getCode(),
@@ -676,7 +897,7 @@ if (!function_exists('apps_google_sheet')) {
             ]);
         }
 
-        Log::channel($logger)->warning(__FUNCTION__ . '::Unexpected flow fallback');
+        apps_log($logger)->warning(__FUNCTION__ . '::Unexpected flow fallback');
         return json_encode([
             "error" => true,
             'code' => Response::HTTP_BAD_REQUEST,
@@ -1052,7 +1273,7 @@ if (!function_exists('apps_pull_login')) {
                     "message" => $th->getMessage()
                 ]
             ];
-            Log::channel($logger)->error('Exception', $result);
+            apps_log($logger)->error('Exception', $result);
         }
 
         return $result;
@@ -1063,7 +1284,7 @@ if (!function_exists('apps_vtiger_login')) {
 
     function apps_vtiger_login($username, $accessKey, $method = 'POST', $logger = 'daily')
     {
-        // Log::channel($logger)->info("==========> " . __FUNCTION__ . " helper is running");
+        // apps_log($logger)->info("==========> " . __FUNCTION__ . " helper is running");
         try {
             $result = (function ($method, $url, $data, $logger) {
                 ///// GET CHALLENGE
@@ -1080,7 +1301,7 @@ if (!function_exists('apps_vtiger_login')) {
                 $challenge = curl_exec($curl);
                 $challenge = json_decode($challenge, true);
 
-                // Log::channel($logger)->info($challenge);
+                // apps_log($logger)->info($challenge);
 
                 curl_close($curl);
 
@@ -1127,7 +1348,7 @@ if (!function_exists('apps_vtiger_login')) {
                     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1); // RETURN THE CONTENTS OF THE CALL
 
                     $result = curl_exec($curl);
-                    // Log::channel($logger)->info($result);
+                    // apps_log($logger)->info($result);
 
                     if (!curl_errno($curl)) {
                         $info = curl_getinfo($curl);
@@ -1179,7 +1400,7 @@ if (!function_exists('apps_toyota_crm_login')) {
     function apps_toyota_crm_login($username, $password, $method = 'POST', $logger = 'daily')
     {
         try {
-            // Log::channel($logger)->info("==========> " . __FUNCTION__ . " helper is running");
+            // apps_log($logger)->info("==========> " . __FUNCTION__ . " helper is running");
             $result = (function ($method, $url, $data, $logger = 'daily') {
                 $curl = curl_init();
                 switch ($method) {
@@ -1260,7 +1481,7 @@ if (!function_exists('apps_mmv_crm_login')) {
     function apps_mmv_crm_login($username = 'mmv_tsp', $password = 'Ci8p2P3B', $method = 'POST', $logger = 'daily'): array
     {
         try {
-            // Log::channel($logger)->info("==========> " . __FUNCTION__ . " helper is running");
+            // apps_log($logger)->info("==========> " . __FUNCTION__ . " helper is running");
             $result = (function ($method, $url, $data) {
                 $curl = curl_init();
 
@@ -1383,7 +1604,7 @@ if (!function_exists('apps_apollo_crm_login')) {
     function apps_apollo_crm_login($username, $password, $sogoAccessToken, $method = 'POST', $logger = 'daily')
     {
         try {
-            // Log::channel($logger)->info("==========> " . __FUNCTION__ . " helper is running");
+            // apps_log($logger)->info("==========> " . __FUNCTION__ . " helper is running");
             $result = (function ($method, $url, $data, $sogoAccessToken, $logger = 'daily') {
                 $curl = curl_init();
                 switch ($method) {
@@ -1620,7 +1841,7 @@ if (!function_exists('apps_facebook_parse_signed_request')) {
         // confirm the signature
         $expected_sig = hash_hmac('sha256', $payload, $secret, $raw = true);
         if ($sig !== $expected_sig) {
-            // Log::channel($logger)->info('Bad Signed JSON signature!');
+            // apps_log($logger)->info('Bad Signed JSON signature!');
             error_log('Bad Signed JSON signature!');
             return null;
         }
@@ -1651,7 +1872,7 @@ if (!function_exists('apps_telegram_send_message')) {
             if (blank($logger)) $logger = 'daily';
 
             if (!in_array(app()->environment(), ['production', 'prod'], true)) { // giới hạn gửi ở production
-                Log::channel($logger)->info('[Telegram::Skipped]', [
+                apps_log($logger)->info('[Telegram::Skipped]', [
                     'env' => app()->environment()
                 ]);
                 return;
@@ -1671,8 +1892,8 @@ if (!function_exists('apps_telegram_send_message')) {
                 ];
             }
 
-            // Log::channel($logger)->info("configs", $configs);
-            // Log::channel($logger)->info("telegramDfOptions", $telegramDfOptions);
+            // apps_log($logger)->info("configs", $configs);
+            // apps_log($logger)->info("telegramDfOptions", $telegramDfOptions);
 
             $telegramDfOptions['text'] = \Illuminate\Support\Str::limit( // có thể sử dụng facades app('url) nhưng không sử dụng được helper str() lúc này, có thể vì chưa load
                 is_array($message) ?
@@ -1683,7 +1904,7 @@ if (!function_exists('apps_telegram_send_message')) {
             $telegram = new \Telegram\Bot\Api(); // getenv TELEGRAM_BOT_TOKEN, it's working
             $telegram->sendMessage($telegramDfOptions);
         } catch (Throwable $th) {
-            Log::channel($logger)->error(__FUNCTION__, (array) $th->getMessage());
+            apps_log($logger)->error(__FUNCTION__, (array) $th->getMessage());
             // DO NOT THROW
         }
         #endregion
