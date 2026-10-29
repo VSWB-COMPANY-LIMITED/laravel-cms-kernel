@@ -147,3 +147,8 @@ laravel-echo-server.lock
 tools/gdrive-mirror-cli/folders.txt
 
 tools/gdrive-mirror-cli/settings.txt
+
+# Gói THƯ VIỆN không khoá phiên bản phụ thuộc — composer.lock chỉ sinh ra khi
+# chạy `composer install` tại chỗ để dùng vendor/bin/phpunit. App tiêu thụ mới là
+# nơi khoá phiên bản. (30/10/2026)
+composer.lock
