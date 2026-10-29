@@ -53,7 +53,7 @@ func run() int {
 	// command's `{folders?*} {--opt=}` signature). Pull every folder ID out
 	// up front so they can appear anywhere among the raw args, and hand the
 	// flag package only the remaining "--flag[=value]" tokens.
-	folderIDs, flagArgs := extractFolderIDs(os.Args[1:])
+	folderIDs, flagArgs := extractFolderIDs(os.Args[1:], fs)
 
 	if err := fs.Parse(flagArgs); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -369,15 +369,40 @@ func runRetryFailed(ctx context.Context, baseCfg mirror.Config, retryFailedPath 
 // `gdrive-mirror --path=x <id1> <id2>` (Go's flag package only parses flags
 // up to the first non-flag token). Order is preserved — folders sync in the
 // order given.
-func extractFolderIDs(args []string) (folderIDs []string, rest []string) {
-	for _, a := range args {
+//
+// fs (may be nil) lets a value flag written in the space-separated form
+// (`--path D:\x`) keep its value: without it `D:\x` would be taken as a
+// folder ID and --path would swallow the next token instead.
+func extractFolderIDs(args []string, fs *flag.FlagSet) (folderIDs []string, rest []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if a != "" && !strings.HasPrefix(a, "-") {
 			folderIDs = append(folderIDs, a)
 			continue
 		}
 		rest = append(rest, a)
+		if fs != nil && flagTakesSeparateValue(fs, a) && i+1 < len(args) {
+			i++
+			rest = append(rest, args[i])
+		}
 	}
 	return folderIDs, rest
+}
+
+// flagTakesSeparateValue: token is a known non-bool flag written without
+// "=value", so the flag package will read its value from the next token.
+func flagTakesSeparateValue(fs *flag.FlagSet, token string) bool {
+	if token == "-" || token == "--" || strings.Contains(token, "=") {
+		return false
+	}
+	f := fs.Lookup(strings.TrimLeft(token, "-"))
+	if f == nil {
+		return false
+	}
+	if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+		return false
+	}
+	return true
 }
 
 // resolveCredsFile: --creds flag wins, then $GOOGLE_APPLICATION_CREDENTIALS,

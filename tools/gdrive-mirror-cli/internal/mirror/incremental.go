@@ -379,6 +379,15 @@ func (s *Syncer) loadRenameIndex() map[string]report.ManifestEntry {
 	return m.Items
 }
 
+// fetchStartPageToken asks the Changes API for the current page token.
+func (s *Syncer) fetchStartPageToken(ctx context.Context) (string, error) {
+	t, err := s.srv.Changes.GetStartPageToken().Context(ctx).SupportsAllDrives(true).Do()
+	if err != nil {
+		return "", err
+	}
+	return t.StartPageToken, nil
+}
+
 // persistItemIndex saves/refreshes the Drive-ID -> local-path index for this
 // folder right after a normal full listing completes (and the shrink guard
 // accepted it) — called UNCONDITIONALLY (not just under --incremental),
@@ -394,7 +403,11 @@ func (s *Syncer) loadRenameIndex() map[string]report.ManifestEntry {
 // Failure here is logged and otherwise ignored: it only means the NEXT run
 // has no/a stale index to compare against (self-healing — rename detection
 // just finds no match that time), never a reason to fail THIS run.
-func (s *Syncer) persistItemIndex(ctx context.Context, items []Item, localPrefix string) {
+//
+// preListToken is the token Run() took BEFORE the listing started (empty if
+// --incremental is off or that call failed); only when it is empty is a
+// token fetched here, after the listing, as before.
+func (s *Syncer) persistItemIndex(ctx context.Context, items []Item, localPrefix string, preListToken string) {
 	folderTag := report.FolderTag([]string{s.cfg.FolderID})
 	dir := s.incrementalStateDir()
 
@@ -403,11 +416,12 @@ func (s *Syncer) persistItemIndex(ctx context.Context, items []Item, localPrefix
 		token = prev.StartPageToken
 	}
 	if s.cfg.Incremental {
-		t, err := s.srv.Changes.GetStartPageToken().Context(ctx).SupportsAllDrives(true).Do()
-		if err != nil {
+		if preListToken != "" {
+			token = preListToken
+		} else if t, err := s.fetchStartPageToken(ctx); err != nil {
 			s.logWarn("Incremental: không lấy được start page token — lần chạy sau (nếu dùng --incremental) sẽ vẫn liệt kê đầy đủ: %v", err)
 		} else {
-			token = t.StartPageToken
+			token = t
 		}
 	}
 

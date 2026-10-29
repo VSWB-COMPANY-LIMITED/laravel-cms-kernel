@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,7 +10,7 @@ import (
 )
 
 func TestExtractFolderIDs_Single(t *testing.T) {
-	ids, rest := extractFolderIDs([]string{"folder123", "--path=/tmp/x", "--force"})
+	ids, rest := extractFolderIDs([]string{"folder123", "--path=/tmp/x", "--force"}, nil)
 	if !reflect.DeepEqual(ids, []string{"folder123"}) {
 		t.Fatalf("ids = %v, want [folder123]", ids)
 	}
@@ -19,7 +20,7 @@ func TestExtractFolderIDs_Single(t *testing.T) {
 }
 
 func TestExtractFolderIDs_Multiple(t *testing.T) {
-	ids, rest := extractFolderIDs([]string{"folderA", "folderB", "folderC", "--path=/tmp/x"})
+	ids, rest := extractFolderIDs([]string{"folderA", "folderB", "folderC", "--path=/tmp/x"}, nil)
 	if !reflect.DeepEqual(ids, []string{"folderA", "folderB", "folderC"}) {
 		t.Fatalf("ids = %v, want [folderA folderB folderC]", ids)
 	}
@@ -32,7 +33,7 @@ func TestExtractFolderIDs_Multiple(t *testing.T) {
 // mixed in any order (matches how Go's flag package would fail to parse
 // them if handed directly — this pre-pass is what makes that possible).
 func TestExtractFolderIDs_InterleavedWithFlags(t *testing.T) {
-	ids, rest := extractFolderIDs([]string{"folderA", "--dry-run", "folderB", "--path=/tmp/x", "folderC"})
+	ids, rest := extractFolderIDs([]string{"folderA", "--dry-run", "folderB", "--path=/tmp/x", "folderC"}, nil)
 	if !reflect.DeepEqual(ids, []string{"folderA", "folderB", "folderC"}) {
 		t.Fatalf("ids = %v, want [folderA folderB folderC] (order preserved)", ids)
 	}
@@ -42,7 +43,7 @@ func TestExtractFolderIDs_InterleavedWithFlags(t *testing.T) {
 }
 
 func TestExtractFolderIDs_None(t *testing.T) {
-	ids, rest := extractFolderIDs([]string{"--retry-failed=report.json", "--path=/tmp/x"})
+	ids, rest := extractFolderIDs([]string{"--retry-failed=report.json", "--path=/tmp/x"}, nil)
 	if len(ids) != 0 {
 		t.Fatalf("ids = %v, want empty", ids)
 	}
@@ -52,7 +53,7 @@ func TestExtractFolderIDs_None(t *testing.T) {
 }
 
 func TestExtractFolderIDs_Empty(t *testing.T) {
-	ids, rest := extractFolderIDs(nil)
+	ids, rest := extractFolderIDs(nil, nil)
 	if len(ids) != 0 || len(rest) != 0 {
 		t.Fatalf("expected both empty, got ids=%v rest=%v", ids, rest)
 	}
@@ -122,5 +123,27 @@ func TestFormatMultiSummary_ShowsAbortReason(t *testing.T) {
 	out := formatMultiSummary(results)
 	if !strings.Contains(out, "ABORTED (shrink-guard)") {
 		t.Fatalf("expected abort reason in output, got:\n%s", out)
+	}
+}
+
+// TestExtractFolderIDs_SpaceSeparatedFlagValue: `--path D:\x` (value as the
+// next token, which Go's flag package accepts) must keep D:\x as --path's
+// value, not turn it into a folder ID; bool flags never take the next token.
+func TestExtractFolderIDs_SpaceSeparatedFlagValue(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	path := fs.String("path", "", "")
+	creds := fs.String("creds", "", "")
+	limit := fs.Int("limit", 0, "")
+	force := fs.Bool("force", false, "")
+
+	ids, rest := extractFolderIDs([]string{"folderA", "--path", `D:\x`, "--force", "folderB", "-limit", "5", "--creds=c.json"}, fs)
+	if !reflect.DeepEqual(ids, []string{"folderA", "folderB"}) {
+		t.Fatalf("ids = %v, want [folderA folderB]", ids)
+	}
+	if err := fs.Parse(rest); err != nil {
+		t.Fatalf("parse %v: %v", rest, err)
+	}
+	if *path != `D:\x` || *creds != "c.json" || *limit != 5 || !*force {
+		t.Fatalf("path=%q creds=%q limit=%d force=%v", *path, *creds, *limit, *force)
 	}
 }

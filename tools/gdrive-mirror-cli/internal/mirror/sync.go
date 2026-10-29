@@ -171,6 +171,17 @@ func (s *Syncer) Run(ctx context.Context) (Stats, error) {
 	// under, so leaving it unsanitized would defeat the point.
 	localPrefix := localpath.TruncateComponent(localpath.SanitizeComponent(s.resolveFolderName(ctx)), 0)
 
+	// Changes API token must be taken BEFORE the listing starts: a file
+	// edited while a large tree is being listed (in a folder already listed)
+	// would otherwise fall between "what the listing saw" and "changes since
+	// the token" and never be picked up by later --incremental runs.
+	preListToken := ""
+	if s.cfg.Incremental && !s.cfg.DryRun {
+		if t, err := s.fetchStartPageToken(ctx); err == nil {
+			preListToken = t
+		}
+	}
+
 	s.logf("Fetching remote item list (recursive) via Drive API...")
 	items, err := s.ListFolderRecursive(ctx, s.cfg.FolderID, "")
 	if err != nil {
@@ -201,7 +212,7 @@ func (s *Syncer) Run(ctx context.Context) (Stats, error) {
 	// detection depends on, regardless of whether --incremental is also in
 	// use. See persistItemIndex doc.
 	if !s.cfg.DryRun {
-		s.persistItemIndex(ctx, items, localPrefix)
+		s.persistItemIndex(ctx, items, localPrefix, preListToken)
 	}
 
 	return s.runTasksAndReport(ctx, items, localPrefix, folderIDs, started)
