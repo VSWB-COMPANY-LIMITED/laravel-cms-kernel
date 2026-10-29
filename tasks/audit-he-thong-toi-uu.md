@@ -89,6 +89,9 @@ Agent thực thi **bắt buộc** áp dụng đầy đủ quy trình **"BẮT BU
    middleware nào bảo vệ, handler trả **toàn bộ session, cookie, header** của request ra JSON công
    khai. Không ảnh hưởng tốc độ, nhưng là route debug lộ thông tin nhạy cảm nếu còn mở trên
    production.
+   - **Đính chính 29/10/2026:** dữ liệu trả về là **của chính người gọi**, không phải của người khác.
+     Rủi ro thật là phản chiếu cookie HttpOnly / `Authorization` (khai thác được khi có XSS). Xem
+     `tasks/audit-he-thong-toi-uu-chuyen-sau.md` mục 5.
 10. **`src/Http/Middleware/TrustProxies.php` (~dòng 24)** — `protected $proxies = '*'`: tin mọi
     proxy, cho phép client tự set `X-Forwarded-For` giả nếu request không chắc chắn luôn đi qua một
     lớp reverse-proxy tin cậy trước. Ảnh hưởng tới bất kỳ logic nào dùng `$request->ip()` (vd

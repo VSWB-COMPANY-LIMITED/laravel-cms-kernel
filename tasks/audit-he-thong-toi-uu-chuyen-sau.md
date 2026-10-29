@@ -68,6 +68,28 @@ code đổi.
 
 ---
 
+## Cập nhật 29/10/2026 — các lỗi đã xác định chắc chắn ĐÃ SỬA
+
+Người dùng cho phép sửa mọi lỗi **xác định chắc chắn**; lỗi chưa tường minh để agent của app tích hợp
+tự xử lý.
+
+**Đã sửa trên v7.x:**
+- SĐT có dấu chấm (3.2);
+- `$data` → `$lead` (3.2);
+- notification sinh nhật: thiếu email, `dd()` (3.1 ý 4);
+- `whereCaseInsensitive` (3.3);
+- route `/test` chết (1, lượt 1);
+- range rò rỉ vào đường đọc header (2.1);
+- `env()` lúc chạy → `apps_env()` (2.2, trừ prefix cache);
+- spread mảng key chuỗi;
+- nhận diện Drive ID (4.1 ý 8);
+- Go: token incremental (4.2 ý 1), parse `--path D:\x` (4.2 ý 9).
+
+Chi tiết từng bản sửa ở `CHANGELOG.md`; cách kiểm trong app ở `tasks/kiem-thu-sau-trien-khai.md` (phần A).
+
+**Chưa sửa** (chưa tường minh, hoặc sửa sẽ đổi hành vi theo nghiệp vụ): xem
+`tasks/kiem-thu-sau-trien-khai.md` phần B. Mọi mục còn lại trong tài liệu này vẫn là đề xuất.
+
 ## 0. Tóm tắt: các việc đáng làm nhất
 
 | # | Hạng mục | Loại | Lợi ích | Công sức | Rủi ro | Mục |
@@ -83,7 +105,7 @@ code đổi.
 | 9 | GDrive PHP ↔ Go trùng chức năng → PHP làm wrapper gọi binary Go | Kiến trúc | Cao | TB–Cao | TB | 4.1 |
 | 10 | Go CLI: token incremental lấy SAU khi list → bỏ sót thay đổi | Bug | TB | Thấp | Thấp | 4.2 |
 | 11 | Go CLI: hết quota ngày vẫn retry từng file (có thể chờ hàng giờ) | Hiệu năng | TB–Cao | Thấp | Thấp | 4.2 |
-| 12 | Endpoint debug công khai trả cả header `Authorization`, cookie, session | Bảo mật | Cao | Thấp | Thấp | 5 |
+| 12 | Endpoint debug công khai phản chiếu header `Authorization`, cookie, session của chính người gọi (rủi ro khi có XSS) | Bảo mật | Trung bình | Thấp | Thấp | 5 |
 
 Trước khi tối ưu: nên có số đo nền và hạ tầng test (mục 6). Không có hai thứ này thì không biết
 tối ưu có hiệu quả thật hay không, và cũng không dám sửa những hàm đang chạy production.
@@ -497,7 +519,12 @@ transport đã chỉnh `MaxIdleConnsPerHost`, giữ HTTP/2. Phần còn lại:
 
 - **`GET /api/v1/test/middleware-check` ✅** — không middleware, không xác thực. Trả về
   `headers->all()` (gồm cả **`Authorization`** nếu client gửi), toàn bộ cookie và
-  `session()->all()`. Gỡ khỏi production hoặc chỉ bật ở môi trường local.
+  `session()->all()`.
+  - **Đính chính 29/10/2026:** đây là dữ liệu **của chính người gọi**, không phải của người khác.
+  - Rủi ro thật hẹp hơn đã viết: phản chiếu cookie HttpOnly / `Authorization` ra nội dung response ⇒
+    đọc được nếu trang có XSS. `CheckMiddlewareCommand` cũng hướng dẫn dùng endpoint này để kiểm.
+  - Quyết định gỡ hay giới hạn môi trường để cho app tích hợp (xem `tasks/kiem-thu-sau-trien-khai.md`
+    mục B7).
 - **`GET /api/v1/cms/plugins/get-plugins` ✅** — công khai danh sách plugin đang bật (thông tin trinh
   sát cho kẻ tấn công).
 - **App secret Facebook gắn cứng** (~dòng 2114) — chuyển vào config/env, và **xoay vòng secret** vì
