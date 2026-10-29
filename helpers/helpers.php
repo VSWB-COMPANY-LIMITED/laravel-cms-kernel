@@ -2433,13 +2433,24 @@ if (!function_exists('apps_cache_group_version')) {
             $version = apps_cache_new_group_version();
             Cache::forever($versionKey, $version);
 
-            apps_log(apps_log_channel('app_cache'))->warning('[Cache] Gieo lại nhãn phiên bản nhóm', [
-                'group' => $groupSlug,
-                'seeded_version' => $version,
-                'y_nghia' => 'Bình thường nếu đây là lần ĐẦU nhóm này được dùng (sau deploy/khởi động Redis mới). '
-                    . 'Nếu nhóm đã chạy ổn định mà dòng này xuất hiện ⇒ khoá nhãn đã BIẾN MẤT, cần kiểm '
-                    . 'maxmemory-policy / FLUSHDB / sự cố Redis.',
-            ]);
+            // 🔴 Dòng log này CHỈ để chẩn đoán — tuyệt đối không được làm hỏng lượt đọc/ghi cache.
+            // Khác với bản gốc (chỉ ghi log trong `catch`), hàm này ghi log ngay trên ĐƯỜNG CHẠY
+            // BÌNH THƯỜNG, nên nó chạm phải những ngữ cảnh mà logger không dùng được: bộ test dùng
+            // `Log::spy()` khiến `Log::channel()` trả `null` ⇒ `->warning()` ném Error, và lỗi đó
+            // trào ngược lên tận nơi gọi. Đã xảy ra thật: LeadAssignmentNullDecisionLoggingTest
+            // (3 ca) chết vì đúng đường này. Nuốt lỗi ở đây là ĐÚNG — mất một dòng log chẩn đoán
+            // không đáng để đánh đổi một lượt ghi cache của lead.
+            try {
+                apps_log(apps_log_channel('app_cache'))?->warning('[Cache] Gieo lại nhãn phiên bản nhóm', [
+                    'group' => $groupSlug,
+                    'seeded_version' => $version,
+                    'y_nghia' => 'Bình thường nếu đây là lần ĐẦU nhóm này được dùng (sau deploy/khởi động Redis mới). '
+                        . 'Nếu nhóm đã chạy ổn định mà dòng này xuất hiện ⇒ khoá nhãn đã BIẾN MẤT, cần kiểm '
+                        . 'maxmemory-policy / FLUSHDB / sự cố Redis.',
+                ]);
+            } catch (\Throwable $ignored) {
+                // Không có logger dùng được (test spy, kênh log chưa dựng…) ⇒ bỏ qua dòng chẩn đoán.
+            }
         }
 
         return (string) $version;
@@ -2501,8 +2512,8 @@ if (!function_exists('apps_cache_get_key')) {
             return $prefix . ":" . $groupSlug . ":v" . $version . ":" . $cacheKey;
         } catch (\Throwable $th) {
             /* Log error if exception occurs */
-            apps_log($logger)->error("Get data error at: " . $cacheKey . ", " . $group);
-            apps_log($logger)->error($th->getMessage());
+            apps_log($logger)?->error("Get data error at: " . $cacheKey . ", " . $group);
+            apps_log($logger)?->error($th->getMessage());
             return Str::slug(env('APP_NAME')) . ":" . 'default';
         }
     }
@@ -2550,8 +2561,8 @@ if (!function_exists('apps_cache_store')) {
             Cache::put($cacheKey, $data, $time);
             return $cacheKey;
         } catch (\Throwable $th) {
-            apps_log($logger)->error("Store data error at: " . $key . ", " . $group);
-            apps_log($logger)->error($th->getMessage());
+            apps_log($logger)?->error("Store data error at: " . $key . ", " . $group);
+            apps_log($logger)?->error($th->getMessage());
             return null;
         }
     }
@@ -2591,8 +2602,8 @@ if (!function_exists('apps_cache_get')) {
             $cacheKey = $isAppliedKey ? $key : apps_cache_get_key($key, $group);
             return Cache::get($cacheKey, $default);
         } catch (\Throwable $th) {
-            apps_log($logger)->error("Get data error at: " . $key . ", " . $group);
-            apps_log($logger)->error($th->getMessage());
+            apps_log($logger)?->error("Get data error at: " . $key . ", " . $group);
+            apps_log($logger)?->error($th->getMessage());
             return $default;
         }
     }
@@ -2683,7 +2694,7 @@ if (!function_exists('apps_cache_flush')) {
                 // namespace không có danh sách thành viên nhóm để dò-xoá nữa (xem nhánh dưới), nên
                 // phần quét-mọi-nhóm-tìm-key-này của thiết kế cũ không còn cần thiết.
                 if (blank($cacheKey)) {
-                    apps_log($logger)->warning("Flush skipped: cacheKey is blank");
+                    apps_log($logger)?->warning("Flush skipped: cacheKey is blank");
                     return;
                 }
 
@@ -2691,7 +2702,7 @@ if (!function_exists('apps_cache_flush')) {
 
                 Cache::forget($appliedKey);
 
-                apps_log($logger)->info("Flushed cached data", [
+                apps_log($logger)?->info("Flushed cached data", [
                     'original_key' => $cacheKey,
                     'applied_key' => $appliedKey,
                     'caller' => $caller['method'] ?? 'unknown',
@@ -2725,7 +2736,7 @@ if (!function_exists('apps_cache_flush')) {
 
                 Cache::forever('cachever:' . $groupSlug, $newVersion);
 
-                apps_log($logger)->info("Flushed group cache (version bump)", [
+                apps_log($logger)?->info("Flushed group cache (version bump)", [
                     'group' => $group,
                     'previous_version' => $previousVersion,
                     'new_version' => $newVersion,
@@ -2734,7 +2745,7 @@ if (!function_exists('apps_cache_flush')) {
                 ]);
             }
         } catch (\Throwable $th) {
-            apps_log($logger)->error("Flush data error", [
+            apps_log($logger)?->error("Flush data error", [
                 'cacheKey' => $cacheKey,
                 'group' => $group,
                 'isAppliedKey' => $isAppliedKey,
@@ -2764,13 +2775,13 @@ if (!function_exists('apps_cache_reset')) {
             $app_cache_key = md5("app_data_cache_list");
             $cache_list = Cache::has($app_cache_key) ? Cache::get($app_cache_key) : []; // Get list of groups
             foreach ($cache_list as $key => $flag) {
-                apps_log($logger)->info("- Delete cache group " . $key);
+                apps_log($logger)?->info("- Delete cache group " . $key);
                 apps_cache_flush(null, $key); // Filter each group and delete all cache keys in it
             }
             Cache::forget($app_cache_key); // Delete cache management file
         } catch (\Throwable $th) {
-            apps_log($logger)->error("Reset cache data error");
-            apps_log($logger)->error($th->getMessage());
+            apps_log($logger)?->error("Reset cache data error");
+            apps_log($logger)?->error($th->getMessage());
         }
     }
 }

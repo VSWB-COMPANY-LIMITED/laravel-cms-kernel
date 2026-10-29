@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed (tiếp)
+- **[29/10/2026] 🔴 Log chẩn đoán của `apps_cache_group_version()` làm CHẾT lượt ghi cache khi logger
+  không dùng được.** Bản vá nhãn-duy-nhất ghi log WARNING ngay trên **đường chạy bình thường** (bản gốc
+  chỉ ghi log trong `catch`), nên nó chạm ngữ cảnh mà `Log::channel()` trả `null` — ví dụ bộ test dùng
+  `Log::spy()`. Khi đó `->warning()` ném `Error`, trào ngược qua `apps_cache_get_key()` lên
+  `apps_cache_store()`; tệ hơn, khối `catch` ở đó lại gọi `apps_log($logger)->error(...)` cũng null ⇒
+  **lỗi đã bắt được biến thành fatal và che mất nguyên nhân gốc**.
+  Đã xảy ra thật: `LeadAssignmentNullDecisionLoggingTest` chết 3 ca (`Call to a member function error()
+  on null` tại `helpers.php:2553`) — chính bộ test này XANH trước bản vá cache.
+  Vá: (a) bọc `try/catch` quanh dòng log chẩn đoán — mất một dòng log không đáng đổi lấy một lượt ghi
+  cache của lead; (b) 13 lời gọi `apps_log($logger)->` trong cả bộ `apps_cache_*` chuyển sang nullsafe
+  `?->` để khối `catch` không bao giờ tự chết nữa.
+  ⚠️ Port sang dòng v6 (PHP 7.4) phải viết lại `?->` — xem `CLAUDE.md` mục Nhánh.
+
 ### Removed
 - **[29/10/2026] Xoá 2 test chết `tests/Unit/AppsGsheetWriteTest.php` và `AppsGsheetAppendSucceededTest.php`** —
   `vendor/bin/phpunit` fatal vì chúng gọi 5 hàm không còn tồn tại (`apps_gsheet_order_row`,
