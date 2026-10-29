@@ -70,7 +70,7 @@ class MacroServiceProvider extends ServiceProvider
 
         Collection::macro('whereCaseInsensitive', function (string $field, string $search) {
             return $this->filter(function ($item) use ($field, $search) {
-                return strtolower($item[$field]) == strtolower($search);
+                return mb_strtolower($item[$field]) == mb_strtolower($search);
             });
         });
         #endregion
